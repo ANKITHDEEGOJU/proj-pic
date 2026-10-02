@@ -15,3 +15,7 @@ function deepFreeze(o) {
 }
 
 module.exports = { DomainError, deepFreeze };
+
+// Two events are "the same delivery" if their business fields match (occurredAt excluded: retries may differ).
+const SAME_FIELDS = ['eventType', 'userId', 'productId', 'quantity', 'amount', 'currency', 'referenceeventId'];
+module.exports.sameEvent = (a, b) => SAME_FIELDS.every(k => a[k] === b[k]);

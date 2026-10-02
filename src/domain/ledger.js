@@ -1,54 +1,48 @@
 "use strict";
-const { DomainError, deepFreeze } = require("./util");
+const { DomainError, deepFreeze, sameEvent } = require("./util");
 const EVENT_TYPES = ["PURCHASE_SUCCEEDED", "PURCHASE_FAILED", "REFUND"];
 
+// Business rules live here; persistence lives in the injected `store` (memory or Postgres).
 class CommerceLedgerService {
-  // Enforcing L1: storage is private; no update/delete methods exist on this class.
-  #records = [];
-  #byEventId = new Map();
-  #refunded = new Set();
   #listeners = [];
-  #seq = 0;
-
-  constructor({ catalog, userExists }) {
+  // Enforcing L1: this service exposes no update/delete; the store has none either (and PG triggers block them).
+  constructor({ catalog, userExists, store }) {
     this.catalog = catalog;
     this.userExists = userExists;
+    this.store = store;
   }
 
   onAppend(fn) {
     this.#listeners.push(fn);
   }
-  size() {
-    return this.#records.length;
+  async size() {
+    return this.store.count();
   }
-  getAll() {
-    return this.#records.slice();
-  } // copy of array of frozen records
-  getByEventId(id) {
-    return this.#byEventId.get(id) ?? null;
+  async getAll() {
+    return this.store.getAll();
+  }
+  async getByEventId(id) {
+    return this.store.getByEventId(id);
   }
 
-  #normalize(ev) {
+  #validate(ev) {
     const bad = (code, msg) => {
       throw new DomainError(code, msg);
     };
     if (!ev || typeof ev !== "object")
       bad("E1_INVALID_EVENT", "Event must be an object");
-    // Enforcing E1: eventId present (uniqueness is enforced at L3 in appendEvent)
     if (typeof ev.eventId !== "string" || !ev.eventId)
-      bad("E1_INVALID_EVENT_ID", "eventId must be a non-empty string");
-    // Enforcing E3: supported types only
+      bad("E1_INVALID_EVENT_ID", "eventId must be a non-empty string"); // E1
     if (!EVENT_TYPES.includes(ev.eventType))
-      bad("E3_UNSUPPORTED_TYPE", `Unsupported eventType: ${ev.eventType}`);
-    // Enforcing E2: valid userId & productId
+      bad("E3_UNSUPPORTED_TYPE", `Unsupported eventType: ${ev.eventType}`); // E3
     if (
       typeof ev.userId !== "string" ||
       !ev.userId ||
       !this.userExists(ev.userId)
     )
-      bad("E2_INVALID_USER", `Unknown userId: ${ev.userId}`);
+      bad("E2_INVALID_USER", `Unknown userId: ${ev.userId}`); // E2
     if (!this.catalog.has(ev.productId))
-      bad("E2_INVALID_PRODUCT", `Unknown productId: ${ev.productId}`);
+      bad("E2_INVALID_PRODUCT", `Unknown productId: ${ev.productId}`); // E2
     if (!Number.isInteger(ev.quantity) || ev.quantity < 1)
       bad("E1_INVALID_QUANTITY", "quantity must be a positive integer");
     if (typeof ev.amount !== "number" || !(ev.amount >= 0))
@@ -60,30 +54,11 @@ class CommerceLedgerService {
       Number.isNaN(Date.parse(ev.occurredAt))
     )
       bad("E1_INVALID_TIMESTAMP", "occurredAt must be an ISO string");
-
     const ref = ev.referenceeventId ?? null;
-    if (ev.eventType === "REFUND") {
-      const orig = ref && this.#byEventId.get(ref);
-      if (!orig || orig.event.eventType !== "PURCHASE_SUCCEEDED")
-        bad(
-          "E1_REFUND_REFERENCE",
-          "REFUND must reference an existing PURCHASE_SUCCEEDED eventId",
-        );
-      if (
-        orig.event.userId !== ev.userId ||
-        orig.event.productId !== ev.productId
-      )
-        bad(
-          "E1_REFUND_MISMATCH",
-          "REFUND user/product must match original purchase",
-        );
-      if (this.#refunded.has(ref))
-        bad("E1_REFUND_ALREADY_APPLIED", `Purchase ${ref} already refunded`);
-    } else if (ref !== null)
+    if (ev.eventType !== "REFUND" && ref !== null)
       bad("E1_UNEXPECTED_REFERENCE", "referenceeventId only allowed on REFUND");
-
-    // Enforcing E4: immutable copy of the event
     return deepFreeze({
+      // E4
       eventId: ev.eventId,
       eventType: ev.eventType,
       userId: ev.userId,
@@ -96,26 +71,53 @@ class CommerceLedgerService {
     });
   }
 
-  appendEvent(event, paymentInfo = {}) {
-    const e = this.#normalize(event);
-    // Enforcing L3: idempotency. Duplicate eventId is a graceful no-op, ledger unchanged.
-    if (this.#byEventId.has(e.eventId))
-      return { appended: false, reason: "DUPLICATE_EVENT", eventId: e.eventId };
+  async #checkRefund(e) {
+    if (e.eventType !== "REFUND") return;
+    const orig =
+      e.referenceeventId && (await this.store.getByEventId(e.referenceeventId));
+    if (!orig || orig.event.eventType !== "PURCHASE_SUCCEEDED")
+      throw new DomainError(
+        "E1_REFUND_REFERENCE",
+        "REFUND must reference an existing PURCHASE_SUCCEEDED eventId",
+      );
+    if (orig.event.userId !== e.userId || orig.event.productId !== e.productId)
+      throw new DomainError(
+        "E1_REFUND_MISMATCH",
+        "REFUND user/product must match original purchase",
+      );
+    if (await this.store.hasRefundFor(e.referenceeventId))
+      throw new DomainError(
+        "E1_REFUND_ALREADY_APPLIED",
+        `Purchase ${e.referenceeventId} already refunded`,
+      );
+  }
 
-    const record = deepFreeze({
-      ledgerSequenceId: ++this.#seq, // L2: monotonic, gap-free ordering
+  async appendEvent(event, paymentInfo = {}) {
+    const e = this.#validate(event);
+    // Enforcing L3 (checked BEFORE refund rules, so a retried refund webhook is a no-op, not an error).
+    const ex = await this.store.getByEventId(e.eventId);
+    if (ex)
+      return {
+        appended: false,
+        reason: sameEvent(ex.event, e)
+          ? "DUPLICATE_EVENT"
+          : "EVENT_ID_CONFLICT",
+        eventId: e.eventId,
+      };
+    await this.#checkRefund(e);
+    const out = await this.store.append({
       event: e,
-      productSnapshot: this.catalog.get(e.productId), // frozen snapshot of price at purchase time
+      productSnapshot: this.catalog.get(e.productId),
       paymentInfo: { ...paymentInfo },
-      recordedAt: new Date().toISOString(),
     });
-    this.#records.push(record); // L1: append only
-    this.#byEventId.set(e.eventId, record);
-    if (e.eventType === "REFUND") this.#refunded.add(e.referenceeventId);
-    this.#listeners.forEach((fn) => fn(record)); // EN: projection reacts to appends
-    return { appended: true, record };
+    if (!out.inserted)
+      return {
+        appended: false,
+        reason: out.conflict ? "EVENT_ID_CONFLICT" : "DUPLICATE_EVENT",
+        eventId: e.eventId,
+      }; // lost a race
+    this.#listeners.forEach((fn) => fn(out.record));
+    return { appended: true, record: out.record };
   }
 }
 module.exports = { CommerceLedgerService };
-
-

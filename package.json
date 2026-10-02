@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "scripts": {
     "start":  "node src/server.js",
-    "verify": "node src/domain/verify.js",
+    "verify": "node src/domain/verify-pg.js",
     "db:init": "export $(cat .env | xargs) && psql \"$DATABASE_URL\" -f db/schema.sql"
   },
   "dependencies": {

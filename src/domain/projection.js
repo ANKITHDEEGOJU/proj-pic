@@ -66,10 +66,9 @@ class EntitlementProjectionEngine {
 
   //Event Replay -
   // Enforcing EN4: full reconstruction by replaying the ledger in sequence order.
-  rebuildFromLedger() {
+  async rebuildFromLedger() {
     this.#state.clear();
-    this.ledger
-      .getAll()
+   (await this.ledger.getAll())
       .sort((a, b) => a.ledgerSequenceId - b.ledgerSequenceId)
       .forEach((r) => this.apply(r));
     return this.#state.size;
