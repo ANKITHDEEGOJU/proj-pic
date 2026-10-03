@@ -24,28 +24,28 @@ router.get('/courses', requireAuth, (req, res) => {
 });
 
 // Shared by buy/refund: append a mock-provider event, then re-render the card.
-async function mockCheckout(req, res, type) {
-  const { ledger, projection, decisions, catalog } = req.app.locals.engine;
-  const p = catalog.get(req.params.slug);
-  if (!p) return res.status(404).end();
-  const ent = projection.get(req.user.id, p.id);
-  const decide = () => decisions.evaluateAccess(req.user.id, p.id);
-  if (type === 'PURCHASE_SUCCEEDED' && ent?.status === 'ACTIVE') return res.send(courseCard(p, decide(), 'You already own this course.'));
-  if (type === 'REFUND' && ent?.status !== 'ACTIVE') return res.send(courseCard(p, decide(), 'Nothing to refund.'));
-  let msg = type === 'REFUND' ? 'Refund processed. Access revoked.' : 'Purchase successful.';
-  try {
-    await ledger.appendEvent({ eventId: `evt_${randomUUID()}`, eventType: type, userId: req.user.id, productId: p.id,
-      quantity: 1, amount: p.price, currency: p.currency, occurredAt: new Date().toISOString(),
-      referenceeventId: type === 'REFUND' ? ent.sourceEventId : null }, { method: 'MOCK_CHECKOUT' });
-  } catch (e) { if (!(e instanceof DomainError)) throw e; msg = `Rejected: ${e.code}`; }
-  res.send(courseCard(p, decide(), msg));
-}
+// async function mockCheckout(req, res, type) {
+//   const { ledger, projection, decisions, catalog } = req.app.locals.engine;
+//   const p = catalog.get(req.params.slug);
+//   if (!p) return res.status(404).end();
+//   const ent = projection.get(req.user.id, p.id);
+//   const decide = () => decisions.evaluateAccess(req.user.id, p.id);
+//   if (type === 'PURCHASE_SUCCEEDED' && ent?.status === 'ACTIVE') return res.send(courseCard(p, decide(), 'You already own this course.'));
+//   if (type === 'REFUND' && ent?.status !== 'ACTIVE') return res.send(courseCard(p, decide(), 'Nothing to refund.'));
+//   let msg = type === 'REFUND' ? 'Refund processed. Access revoked.' : 'Purchase successful.';
+//   try {
+//     await ledger.appendEvent({ eventId: `evt_${randomUUID()}`, eventType: type, userId: req.user.id, productId: p.id,
+//       quantity: 1, amount: p.price, currency: p.currency, occurredAt: new Date().toISOString(),
+//       referenceeventId: type === 'REFUND' ? ent.sourceEventId : null }, { method: 'MOCK_CHECKOUT' });
+//   } catch (e) { if (!(e instanceof DomainError)) throw e; msg = `Rejected: ${e.code}`; }
+//   res.send(courseCard(p, decide(), msg));
+// }
 
-router.post('/courses/:slug/buy',    requireAuth, (req, res, next) => mockCheckout(req, res, 'PURCHASE_SUCCEEDED').catch(next));
-router.post('/courses/:slug/refund', requireAuth, (req, res, next) => mockCheckout(req, res, 'REFUND').catch(next));
+// router.post('/courses/:slug/buy',    requireAuth, (req, res, next) => mockCheckout(req, res, 'PURCHASE_SUCCEEDED').catch(next));
+// router.post('/courses/:slug/refund', requireAuth, (req, res, next) => mockCheckout(req, res, 'REFUND').catch(next));
 
-router.get('/courses/:slug/access', requireAuth, (req, res) =>
-  res.send(accessFragment(req.app.locals.engine.decisions.evaluateAccess(req.user.id, req.params.slug))));
+// router.get('/courses/:slug/access', requireAuth, (req, res) =>
+//   res.send(accessFragment(req.app.locals.engine.decisions.evaluateAccess(req.user.id, req.params.slug))));
 
 // Full page: this user's entitlements + ledger rows
 router.get('/activity', requireAuth, async (req, res, next) => {

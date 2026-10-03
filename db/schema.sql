@@ -56,3 +56,23 @@ CREATE TRIGGER trg_ledger_no_mod BEFORE UPDATE OR DELETE ON commerce_ledger
 DROP TRIGGER IF EXISTS trg_ledger_no_truncate ON commerce_ledger;
 CREATE TRIGGER trg_ledger_no_truncate BEFORE TRUNCATE ON commerce_ledger
   FOR EACH STATEMENT EXECUTE FUNCTION ledger_append_only();
+
+
+
+-- Webhook inbox: raw payloads before any processing
+CREATE TABLE IF NOT EXISTS webhook_inbox (
+  id                  BIGSERIAL PRIMARY KEY,
+  provider            TEXT        NOT NULL,
+  provider_event_id   TEXT        NOT NULL,
+  raw_body            TEXT        NOT NULL,
+  headers             JSONB       NOT NULL DEFAULT '{}',
+  received_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status              TEXT        NOT NULL DEFAULT 'RECEIVED'
+                      CHECK (status IN ('RECEIVED','PROCESSING','PROCESSED','IGNORED','FAILED')),
+  failure_reason      TEXT,
+  processed_at        TIMESTAMPTZ,
+  ledger_event_id     TEXT        REFERENCES commerce_ledger(event_id),
+  UNIQUE (provider, provider_event_id)   -- idempotency at the inbox level
+);
+
+CREATE INDEX IF NOT EXISTS ix_inbox_status ON webhook_inbox (status) WHERE status IN ('RECEIVED','FAILED');

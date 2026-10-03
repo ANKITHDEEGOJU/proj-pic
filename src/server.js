@@ -16,14 +16,26 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   const engine = createEngine({ products: await loadProducts(), store }); // catalog mirrors Postgres courses
   await engine.projection.rebuildFromLedger();           // EN4: projection is recovered from the ledger at boot
   app.locals.engine = engine;
+
+  // Webhooks MUST come before express.json() so express.raw() can capture the raw bytes.
+  app.use(require('./routes/webhooks'));
+
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
   app.use(cookieParser());
   app.use(attachUser);
   app.use(require("./routes/auth"));
+  app.use(require('./routes/checkout'));
   app.use(require("./routes/commerce"));
   app.use(require("./routes/courses"));
   const port = process.env.PORT || 3000;
+
+  app.use((err, req, res, _next) => {
+    console.error(err);
+    if (req.get('HX-Request')) return res.status(500).send('<span class="err">Server error. Check logs.</span>');
+    res.status(500).json({ error: err.message });
+  });
+
   app.listen(port, () => console.log("LearnX on :" + port));
 })().catch((e) => {
   console.error(e);

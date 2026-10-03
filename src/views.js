@@ -38,8 +38,8 @@ const courseCard = (p, d, msg = '') => {
   return `<div class="card" id="${id}"><h3>${esc(p.name)} ${badge}</h3>
 <strong>${p.price.toFixed(2)} ${esc(p.currency)}</strong><br>
 ${d.allowed
-  ? `<button hx-post="/courses/${s}/refund" ${t}>Refund</button>`
-  : `<button hx-post="/courses/${s}/buy" ${t}>Buy (mock checkout)</button>`}
+  ? `<button hx-post="/courses/${s}/checkout/refund" ${t}>Refund</button>`
+  : `<button hx-post="/courses/${s}/checkout" ${t}>Buy (mock checkout)</button>`}
 <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Play</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div></div>`;
 };
