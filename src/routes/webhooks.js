@@ -32,12 +32,14 @@ router.post(
     let payload;
     try {
       payload = JSON.parse(rawBody);
+      console.log(payload);
     } catch {
       return res.status(400).json({ error: "Invalid JSON" });
     }
 
-    const providerEventId =
-      payload.providerRefundId || payload.providerPaymentId;
+  // Each adapter knows how to extract its own event ID from its payload structure.
+    const providerEventId = adapter.extractEventId(payload);
+
     if (!providerEventId)
       return res.status(400).json({ error: "Missing providerPaymentId" });
 

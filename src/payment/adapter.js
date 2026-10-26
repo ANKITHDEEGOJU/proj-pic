@@ -26,6 +26,15 @@ class PaymentProviderAdapter {
     throw new Error("not implemented");
   }
 
+    /**
+   * Extract the provider's own event/payment ID from the raw parsed payload.
+   * Used by the webhook route to key the inbox row BEFORE normalization.
+   * Must return a stable string that is unique per event delivery.
+   * Returns null for payloads that cannot be keyed (will be rejected with 400).
+   */
+  extractEventId(payload) { throw new Error('not implemented'); }
+
+
   /**
    * Translate a provider-specific payload into a CommerceEvent (or null for ignorable events).
    * This is the EventNormalizer step in the pipeline.

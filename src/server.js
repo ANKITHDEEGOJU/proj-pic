@@ -25,7 +25,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   app.use(cookieParser());
   app.use(attachUser);
   app.use(require("./routes/auth"));
-  app.use(require('./routes/checkout'));
+  app.use(require("./routes/checkout"));
   app.use(require("./routes/commerce"));
   app.use(require("./routes/courses"));
   const port = process.env.PORT || 3000;
@@ -36,7 +36,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
     res.status(500).json({ error: err.message });
   });
 
-  app.listen(port, () => console.log("LearnX on :" + port));
+  app.listen(port, () => console.log("StreamFlix :" + port));
 })().catch((e) => {
   console.error(e);
   process.exit(1);

@@ -1,10 +1,13 @@
 'use strict';
 const { MockPaymentAdapter } = require('./adapters/mock');
+const { RazorpayPaymentAdapter } = require('./adapters/razorpay');
+
 
 // To add a provider: import its adapter and add one line here.
 const registry = {
   mock: new MockPaymentAdapter(),
   // stripe: new StripePaymentAdapter(),
+  razorpay: new RazorpayPaymentAdapter()
 };
 
 function getAdapter(name) {

@@ -43,9 +43,22 @@ router.get('/courses', requireAuth, (req, res) => {
 
 // router.post('/courses/:slug/buy',    requireAuth, (req, res, next) => mockCheckout(req, res, 'PURCHASE_SUCCEEDED').catch(next));
 // router.post('/courses/:slug/refund', requireAuth, (req, res, next) => mockCheckout(req, res, 'REFUND').catch(next));
+// Polling endpoint used by the pending-refund card.
+// Returns the normal card once the decision is no longer ACTIVE (webhook confirmed).
+// When the card is no longer pending it has no hx-trigger, so polling stops automatically.
+router.get('/courses/:slug/card', requireAuth, (req, res) => {
+  const { catalog, decisions } = req.app.locals.engine;
+  const p = catalog.get(req.params.slug);
+  if (!p) return res.status(404).end();
+  const d = decisions.evaluateAccess(req.user.id, p.id);
+  // Still waiting: return pending card so HTMX keeps polling.
+  if (d.allowed) return res.send(courseCard(p, d, '', true));
+  // Refund confirmed (or failed): return normal card, polling stops.
+  res.send(courseCard(p, d));
+});
 
-// router.get('/courses/:slug/access', requireAuth, (req, res) =>
-//   res.send(accessFragment(req.app.locals.engine.decisions.evaluateAccess(req.user.id, req.params.slug))));
+router.get('/courses/:slug/access', requireAuth, (req, res) =>
+  res.send(accessFragment(req.app.locals.engine.decisions.evaluateAccess(req.user.id, req.params.slug))));
 
 // Full page: this user's entitlements + ledger rows
 router.get('/activity', requireAuth, async (req, res, next) => {

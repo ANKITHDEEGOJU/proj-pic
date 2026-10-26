@@ -19,6 +19,13 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
     return { providerPaymentId, redirectUrl };
   }
 
+  // Mock payloads carry providerRefundId (refunds) or providerPaymentId (everything else).
+  extractEventId(payload) {
+    return payload.providerRefundId || payload.providerPaymentId || null;
+  }
+
+
+
   // Signature: we just check the secret header. Real adapters use HMAC-SHA256 of raw body.
   verifyWebhook(rawBody, headers) {
     return headers['x-mock-secret'] === MOCK_SECRET;

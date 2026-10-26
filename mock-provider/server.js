@@ -103,7 +103,7 @@ app.get("/pay/:providerPaymentId", (req, res) => {
 app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
   const { providerPaymentId } = req.params;
   const { action, userId, productId, amount, currency } = req.body;
-  if (action === "cancel") return res.redirect(`${STREAMFLIX_URL}/`);
+  if (action === "cancel") return res.redirect(`${STREAMFLIX_URL}/courses`);
   const eventType = action === "pay" ? "payment.succeeded" : "payment.failed";
   // Fire webhook asynchronously; don't block the redirect.
   await fireWebhook({
@@ -129,7 +129,7 @@ app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
   //   ),
   // );
 
-  res.redirect(`${STREAMFLIX_URL}/`);
+  res.redirect(`${STREAMFLIX_URL}/courses`);
 });
 
 
