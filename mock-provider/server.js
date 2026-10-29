@@ -64,11 +64,98 @@ const page = (
   title,
   body,
 ) => `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
-<style>body{font-family:system-ui;max-width:480px;margin:4rem auto;background:#0d1117;color:#e6edf3;padding:1rem}
-.card{border:1px solid #30363d;border-radius:8px;padding:2rem;background:#161b22}
-button{padding:.8rem 2rem;border:0;border-radius:6px;cursor:pointer;font-size:1rem;margin:.5rem}
-.pay{background:#2ea043;color:#fff} .fail{background:#da3633;color:#fff} .cancel{background:#333;color:#eee}
-p{color:#8b949e}</style></head><body>${body}</body></html>`;
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Roboto:wght@400;500;700&display=swap');
+
+  body {
+    font-family: 'Roboto', system-ui, sans-serif;
+    max-width: 520px;
+    margin: 4rem auto;
+    background: #F6F5F0;
+    color: #1C1E26;
+    padding: 1rem;
+    line-height: 1.5;
+  }
+  
+  .card {
+    border: 1px solid rgba(91, 95, 110, 0.15);
+    border-radius: 12px;
+    padding: 2rem;
+    background: #ffffff;
+    box-shadow: 0 8px 16px -2px rgba(0,0,0,0.06);
+  }
+
+  h2 {
+    color: #2743D8;
+    font-size: 1.5rem;
+    margin-top: 0;
+    margin-bottom: 1.25rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  p {
+    color: #5B5F6E;
+    font-size: 0.95rem;
+    margin: 0.6rem 0;
+  }
+
+  p strong {
+    color: #1C1E26;
+  }
+
+  hr {
+    border: 0;
+    border-top: 1px solid rgba(91, 95, 110, 0.15);
+    margin: 1.5rem 0;
+  }
+
+  button {
+    padding: 0.75rem 1.25rem;
+    border: 0;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+    font-family: 'Roboto', sans-serif;
+    margin: 0.5rem 0.4rem 0.5rem 0;
+    transition: all 0.1s ease;
+  }
+
+  /* Raised 3D Buttons */
+  .pay {
+    background: #2743D8;
+    color: #ffffff;
+    box-shadow: 0 4px 0 #1A2D91, 0 5px 10px rgba(39, 67, 216, 0.2);
+    transform: translateY(-2px);
+  }
+  .pay:active {
+    box-shadow: 0 0 0 #1A2D91;
+    transform: translateY(2px);
+  }
+
+  .fail {
+    background: #d32f2f;
+    color: #ffffff;
+    box-shadow: 0 4px 0 #9a0007, 0 5px 10px rgba(211, 47, 47, 0.2);
+    transform: translateY(-2px);
+  }
+  .fail:active {
+    box-shadow: 0 0 0 #9a0007;
+    transform: translateY(2px);
+  }
+
+  .cancel {
+    background: #ffffff;
+    color: #5B5F6E;
+    border: 1px solid rgba(91, 95, 110, 0.3);
+    box-shadow: 0 4px 0 #d0cfca;
+    transform: translateY(-2px);
+  }
+  .cancel:active {
+    box-shadow: 0 0 0 #d0cfca;
+    transform: translateY(2px);
+  }
+</style></head><body>${body}</body></html>`;
 
 // The page a user lands on after clicking Buy in StreamFlix.
 app.get("/pay/:providerPaymentId", (req, res) => {
@@ -77,8 +164,7 @@ app.get("/pay/:providerPaymentId", (req, res) => {
   res.send(
     page(
       "Mock Payment",
-      `
-    <div class="card">
+      `<div class="card">
       <h2>🎬 MockPay Checkout</h2>
       <p><strong>Product:</strong> ${esc(product)}</p>
       <p><strong>Amount:</strong> ${esc(amount)} ${esc(currency)}</p>
