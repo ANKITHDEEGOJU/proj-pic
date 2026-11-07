@@ -11,7 +11,8 @@ function clearToken(res) { res.clearCookie(COOKIE); }
 function attachUser(req, _res, next) {
   try {
     const p = jwt.verify(req.cookies[COOKIE], process.env.JWT_SECRET);
-    req.user = { id: p.sub, email: p.email };
+    const adminEmail = process.env.ADMIN_EMAIL || "admin@learnx.com";
+    req.user = { id: p.sub, email: p.email,isAdmin: p.email === adminEmail };
   } catch { req.user = null; }
   next();
 }

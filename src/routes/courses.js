@@ -1,60 +1,87 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
-const { layout,courseCard, accessFragment, activityPage } = require('../views');
+const { layout,courseCard,subscriptionCard, accessFragment, activityPage } = require('../views');
+const { resolveSubscriptionPrice } = require('../services/pricingEngine');
 const { randomUUID } = require('node:crypto');
 const {DomainError} = require('../domain/util')
-// router.get('/', requireAuth, async (req, res) => {
-//   const { rows } = await pool.query('SELECT * FROM courses ORDER BY price_cents');
-//   res.send(layout('Courses'
-//     // , 
-//     // `<h2>Courses</h2>
-//     // ${courseCard(rows)}`
-//     , req.user));
-// });
+
+
+
+// GET /courses/subscription-banner - Re-fetched on cartUpdated
+router.get('/courses/subscription-banner', requireAuth, async (req, res) => {
+  try {
+    const cartRes = await pool.query(
+      'SELECT 1 FROM cart_items WHERE user_id = $1 AND product_id = $2',
+      [req.user.id, 'sub_monthly']
+    );
+    const subInCart = cartRes.rows.length > 0;
+    const subPriceInfo = await resolveSubscriptionPrice(req.user);
+    res.send(subscriptionCard(subInCart, subPriceInfo));
+  } catch (err) {
+    console.error('Error fetching subscription banner:', err);
+    res.status(500).end();
+  }
+});
 
 //New changes
 
-router.get('/courses', requireAuth, (req, res) => {
+router.get('/courses', requireAuth, async(req, res) => {
   const { catalog, decisions } = req.app.locals.engine;
+  
+  // Retrieve items currently in the user's session cart (defaults to empty array)
+  try {
+    const cartRes = await pool.query(
+      'SELECT product_id FROM cart_items WHERE user_id = $1',
+      [req.user.id]
+    );
+    const cart = cartRes.rows.map(r => r.product_id);
+  
+  //const cart = req.session?.cart || [];
+  
+  // 1. Subscription Banner
+  const subInCart = cart.includes('sub_monthly');
+  const subPriceInfo = await resolveSubscriptionPrice(req.user);
+  const subBanner = subscriptionCard(subInCart, subPriceInfo);
+  
   const cards = catalog.list()
-    .map(p => courseCard(p, decisions.evaluateAccess(req.user.id, p.id)))
+    .map(p => {
+        const slug = p.slug || p.id;
+        const d = decisions.evaluateAccess(req.user.id, slug);
+        const inCart = cart.includes(slug);
+        return courseCard(p, d, '', false, inCart);
+      })
     .join('');
-  res.send(layout('Courses', `<h2>Courses</h2>${cards}`, req.user));
+
+  const body = `<h2>Courses</h2>${subBanner}${cards}`;
+  res.send(layout('Courses', body, req.user,cart.length));
+  } catch (err) {
+    console.error('Error rendering courses page:', err);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-// Shared by buy/refund: append a mock-provider event, then re-render the card.
-// async function mockCheckout(req, res, type) {
-//   const { ledger, projection, decisions, catalog } = req.app.locals.engine;
-//   const p = catalog.get(req.params.slug);
-//   if (!p) return res.status(404).end();
-//   const ent = projection.get(req.user.id, p.id);
-//   const decide = () => decisions.evaluateAccess(req.user.id, p.id);
-//   if (type === 'PURCHASE_SUCCEEDED' && ent?.status === 'ACTIVE') return res.send(courseCard(p, decide(), 'You already own this course.'));
-//   if (type === 'REFUND' && ent?.status !== 'ACTIVE') return res.send(courseCard(p, decide(), 'Nothing to refund.'));
-//   let msg = type === 'REFUND' ? 'Refund processed. Access revoked.' : 'Purchase successful.';
-//   try {
-//     await ledger.appendEvent({ eventId: `evt_${randomUUID()}`, eventType: type, userId: req.user.id, productId: p.id,
-//       quantity: 1, amount: p.price, currency: p.currency, occurredAt: new Date().toISOString(),
-//       referenceeventId: type === 'REFUND' ? ent.sourceEventId : null }, { method: 'MOCK_CHECKOUT' });
-//   } catch (e) { if (!(e instanceof DomainError)) throw e; msg = `Rejected: ${e.code}`; }
-//   res.send(courseCard(p, decide(), msg));
-// }
 
-// router.post('/courses/:slug/buy',    requireAuth, (req, res, next) => mockCheckout(req, res, 'PURCHASE_SUCCEEDED').catch(next));
-// router.post('/courses/:slug/refund', requireAuth, (req, res, next) => mockCheckout(req, res, 'REFUND').catch(next));
-// Polling endpoint used by the pending-refund card.
-// Returns the normal card once the decision is no longer ACTIVE (webhook confirmed).
-// When the card is no longer pending it has no hx-trigger, so polling stops automatically.
-router.get('/courses/:slug/card', requireAuth, (req, res) => {
+router.get('/courses/:slug/card', requireAuth, async(req, res) => {
   const { catalog, decisions } = req.app.locals.engine;
   const p = catalog.get(req.params.slug);
   if (!p) return res.status(404).end();
-  const d = decisions.evaluateAccess(req.user.id, p.id);
-  // Still waiting: return pending card so HTMX keeps polling.
-  if (d.allowed) return res.send(courseCard(p, d, '', true));
-  // Refund confirmed (or failed): return normal card, polling stops.
-  res.send(courseCard(p, d));
+try {
+    const cartRes = await pool.query(
+      'SELECT product_id FROM cart_items WHERE user_id = $1',
+      [req.user.id]
+    );
+    const cart = cartRes.rows.map(r => r.product_id);
+    const slug = p.slug || p.id;
+    const d = decisions.evaluateAccess(req.user.id, slug);
+    const inCart = cart.includes(slug);
+
+    if (d.allowed) return res.send(courseCard(p, d, '', true, inCart));
+    res.send(courseCard(p, d, '', false, inCart));
+  } catch (err) {
+    console.error('Error polling card status:', err);
+    res.status(500).end();
+  }
 });
 
 router.get('/courses/:slug/access', requireAuth, (req, res) =>

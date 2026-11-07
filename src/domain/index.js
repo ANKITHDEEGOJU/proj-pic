@@ -8,6 +8,7 @@ const { PgLedgerStore } = require('./stores/pgLedgerStore');
 // Wires the four services. `userExists` is injected so the domain stays independent of Postgres.
 function createEngine({ products, userExists = id => typeof id === 'string' && id.length > 0, store = new PgLedgerStore() }) {
   const catalog = new CatalogStore(products);
+  // console.log(catalog.list()) --Catalog is created
   const ledger = new CommerceLedgerService({ catalog, userExists, store });
   const projection = new EntitlementProjectionEngine(ledger);
   const decisions = new EntitlementDecisionEngine(projection);

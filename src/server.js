@@ -12,23 +12,34 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
 (async () => {
   const app = express();
     // Ledger lives in Postgres (set LEDGER_STORE=memory only for throwaway runs).
-  const store = process.env.LEDGER_STORE === 'memory' ? undefined : new PgLedgerStore(pool);
+  const store = new PgLedgerStore(pool);
   const engine = createEngine({ products: await loadProducts(), store }); // catalog mirrors Postgres courses
+
   await engine.projection.rebuildFromLedger();           // EN4: projection is recovered from the ledger at boot
   app.locals.engine = engine;
 
   // Webhooks MUST come before express.json() so express.raw() can capture the raw bytes.
   app.use(require('./routes/webhooks'));
 
-  app.use(express.urlencoded({ extended: false }));
+  app.use(express.urlencoded({ extended: true }));
   app.use(express.json());
   app.use(cookieParser());
   app.use(attachUser);
+  app.use((req, res, next) => {
+  if (req.method === 'POST') {
+    console.log(`\n[${new Date().toISOString()}] POST ${req.path}`);
+    console.log('Headers:', { 'content-type': req.headers['content-type'], 'hx-request': req.headers['hx-request'] });
+    console.log('Body:', req.body);
+  }
+  next();
+});
   app.use(require("./routes/auth"));
-  app.use(require("./routes/checkout"));
-  app.use(require("./routes/commerce"));
+  app.use(require("./routes/admin"));
   app.use(require("./routes/courses"));
-  const port = process.env.PORT || 3000;
+  app.use(require("./routes/cart"));
+  app.use(require("./routes/commerce"));
+  app.use(require("./routes/checkout"));
+  const port = 3000;
 
   app.use((err, req, res, _next) => {
     console.error(err);
@@ -36,7 +47,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
     res.status(500).json({ error: err.message });
   });
 
-  app.listen(port, () => console.log("StreamFlix :" + port));
+  app.listen(port, () => console.log("LEARNX :- " + port));
 })().catch((e) => {
   console.error(e);
   process.exit(1);
