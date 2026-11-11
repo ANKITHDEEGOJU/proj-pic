@@ -1,7 +1,26 @@
 'use strict';
 
 const pool = require('../db');
-const { EVENT_EFFECT } = require('../domain/util');
+const { EVENT_EFFECT, DomainError } = require('../domain/util');
+
+// M2 retry policy (env-overridable). A failed row is retried after BASE, 2*BASE, 4*BASE ...
+// seconds (capped at MAX_DELAY) and becomes DEAD after MAX_ATTEMPTS processing attempts.
+const RETRY = Object.freeze({
+  MAX_ATTEMPTS: Number(process.env.WEBHOOK_MAX_ATTEMPTS || 8),
+  BASE_SECONDS: Number(process.env.WEBHOOK_RETRY_BASE_SECONDS || 30),
+  MAX_DELAY_SECONDS: Number(process.env.WEBHOOK_RETRY_MAX_SECONDS || 3600),
+  // While a row is PROCESSING, next_retry_at is its lease: after this long a crashed
+  // attempt's row can be claimed again.
+  LEASE_SECONDS: Number(process.env.WEBHOOK_LEASE_SECONDS || 300),
+});
+
+// Failures worth asking the provider to re-send: the event arrived before the one it
+// depends on (e.g. refund before purchase) or an infrastructure error (DB down, etc.).
+// Other domain errors are permanent: re-sending the same payload cannot fix them.
+function isRetryable(err) {
+  if (!(err instanceof DomainError)) return true;
+  return err.code === 'E1_INVALID_REFERENCE';
+}
 
 class WebhookProcessor {
   constructor({ ledger }) {
@@ -66,20 +85,31 @@ class WebhookProcessor {
     return result.reason === 'ALREADY_REVERSED_SAME_TYPE' && Boolean(await this.ledger.getByEventId(eventId));
   }
 
+  // Takes exclusive ownership of an inbox row (the webhook route and the retry worker can
+  // both try). Fails if it is already done or another attempt holds a live lease.
+  async claim(id) {
+    const { rowCount } = await pool.query(
+      `UPDATE webhook_inbox
+          SET status='PROCESSING', attempts=attempts+1,
+              next_retry_at = now() + make_interval(secs => $2)
+        WHERE id=$1 AND status NOT IN ('PROCESSED','IGNORED')
+          AND NOT (status='PROCESSING' AND next_retry_at > now())`,
+      [id, RETRY.LEASE_SECONDS]
+    );
+    return rowCount === 1;
+  }
+
   async process(inboxRow, adapter) {
     const { id, raw_body } = inboxRow;
 
-    await pool.query(
-      `UPDATE webhook_inbox SET status='PROCESSING' WHERE id=$1`,
-      [id]
-    );
+    if (!(await this.claim(id))) return { outcome: 'IN_PROGRESS' };
 
     let payload;
     try {
       payload = JSON.parse(raw_body);
     } catch {
-      await this.#fail(id, 'INVALID_JSON');
-      return { outcome: 'FAILED', reason: 'INVALID_JSON' };
+      const st = await this.markFailed(id, 'INVALID_JSON');
+      return { outcome: 'FAILED', reason: 'INVALID_JSON', retryable: false, inboxStatus: st?.status };
     }
 
     const event = adapter.normalize(payload);
@@ -251,13 +281,13 @@ class WebhookProcessor {
           );
         }
       } catch (e) {
-        await this.#fail(id, e.message);
-        return { outcome: 'FAILED', reason: e.message };
+        const st = await this.markFailed(id, e.message);
+        return { outcome: 'FAILED', reason: e.message, retryable: isRetryable(e), inboxStatus: st?.status };
       }
     }
 
     await pool.query(
-      `UPDATE webhook_inbox SET status='PROCESSED', processed_at=now(), ledger_event_id=$2, failure_reason=NULL WHERE id=$1`,
+      `UPDATE webhook_inbox SET status='PROCESSED', processed_at=now(), ledger_event_id=$2, failure_reason=NULL, next_retry_at=NULL WHERE id=$1`,
       [id, lastLedgerEventId]
     );
 
@@ -267,12 +297,21 @@ class WebhookProcessor {
     };
   }
 
-  async #fail(id, reason) {
-    await pool.query(
-      `UPDATE webhook_inbox SET status='FAILED', processed_at=now(), failure_reason=$2 WHERE id=$1`,
-      [id, reason]
+  // Records a failed attempt and schedules the next one with exponential backoff,
+  // or parks the row as DEAD once it has used up its attempts (reconciliation reports it).
+  async markFailed(id, reason) {
+    const { rows } = await pool.query(
+      `UPDATE webhook_inbox
+          SET status = CASE WHEN attempts >= $3 THEN 'DEAD' ELSE 'FAILED' END,
+              next_retry_at = CASE WHEN attempts >= $3 THEN NULL
+                ELSE now() + make_interval(secs => LEAST($4 * power(2, GREATEST(attempts - 1, 0)), $5)) END,
+              processed_at = now(), failure_reason = $2
+        WHERE id = $1
+        RETURNING status, attempts, next_retry_at`,
+      [id, reason, RETRY.MAX_ATTEMPTS, RETRY.BASE_SECONDS, RETRY.MAX_DELAY_SECONDS]
     );
+    return rows[0];
   }
 }
 
-module.exports = { WebhookProcessor };
+module.exports = { WebhookProcessor, RETRY, isRetryable };

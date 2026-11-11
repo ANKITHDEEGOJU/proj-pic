@@ -213,3 +213,50 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
 );
 
 CREATE INDEX IF NOT EXISTS ix_inbox_status ON webhook_inbox (status) WHERE status IN ('RECEIVED','FAILED');
+-- M2: retry bookkeeping. attempts = processing attempts so far; next_retry_at = when a
+-- FAILED row is due again (backoff) or, while PROCESSING, when its lease expires.
+-- DEAD = gave up after WEBHOOK_MAX_ATTEMPTS (reported by reconciliation, re-queued by an admin).
+ALTER TABLE webhook_inbox ADD COLUMN IF NOT EXISTS attempts      INT NOT NULL DEFAULT 0;
+ALTER TABLE webhook_inbox ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+ALTER TABLE webhook_inbox DROP CONSTRAINT IF EXISTS webhook_inbox_status_check;
+ALTER TABLE webhook_inbox ADD CONSTRAINT webhook_inbox_status_check
+  CHECK (status IN ('RECEIVED','PROCESSING','PROCESSED','IGNORED','FAILED','DEAD'));
+CREATE INDEX IF NOT EXISTS ix_inbox_retry_due ON webhook_inbox (next_retry_at)
+  WHERE status IN ('FAILED','PROCESSING');
+
+-- -----------------------------------------------------------------------------
+-- 8. Reconciliation (M6)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS recon_runs (
+  id           BIGSERIAL PRIMARY KEY,
+  trigger      TEXT        NOT NULL,              -- 'scheduled' | 'manual:<email>' | 'script'
+  started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at  TIMESTAMPTZ,
+  since        TIMESTAMPTZ NOT NULL,              -- provider look-back window start
+  summary      JSONB       NOT NULL DEFAULT '{}',
+  error        TEXT
+);
+
+-- One row per discrepancy. AUTO_FIXED rows are the audit trail of repairs the
+-- reconciler made itself; OPEN rows need an admin.
+CREATE TABLE IF NOT EXISTS recon_issues (
+  id            BIGSERIAL PRIMARY KEY,
+  kind          TEXT        NOT NULL,
+  provider      TEXT,
+  ref           TEXT        NOT NULL,             -- payment / refund / order / inbox id the issue is about
+  order_id      UUID,
+  details       JSONB       NOT NULL DEFAULT '{}',
+  status        TEXT        NOT NULL DEFAULT 'OPEN'
+                CHECK (status IN ('OPEN','RESOLVED','AUTO_FIXED')),
+  first_run_id  BIGINT      REFERENCES recon_runs(id),
+  last_run_id   BIGINT      REFERENCES recon_runs(id),
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at   TIMESTAMPTZ,
+  resolved_by   TEXT,
+  note          TEXT
+);
+-- An open issue is reported once and updated on later runs, not duplicated.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_recon_issue_open ON recon_issues (kind, ref) WHERE status = 'OPEN';
+-- A given repair is made (and logged) once.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_recon_issue_fixed ON recon_issues (kind, ref) WHERE status = 'AUTO_FIXED';

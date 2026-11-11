@@ -59,6 +59,12 @@ router.get('/admin', requireAdmin, async (req, res) => {
         </div>
 
         <div class="card">
+          <h3>Reconciliation & Webhooks</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Provider vs ledger discrepancies, automatic repairs, and failed / dead webhook deliveries.</p>
+          <a href="/admin/reconciliation"><button class="alt">Open Reconciliation →</button></a>
+        </div>
+
+        <div class="card">
           <h3>Pricing Rules & Coupons</h3>
           <p style="color: #5B5F6E; margin-bottom: 1rem;">Configure pricing rules, discounts, domain overrides, and promo coupons.</p>
           <a href="/admin/pricing-rules"><button class="alt">Manage Pricing & Coupons →</button></a>
@@ -531,6 +537,101 @@ router.post('/admin/pricing-rules/:id/toggle', requireAdmin, async (req, res) =>
     console.error('Error toggling pricing rule:', err);
     res.status(500).end();
   }
+});
+
+// ---------------------------------------------------------------------------
+// M6 Reconciliation + M2 webhook inbox health
+// ---------------------------------------------------------------------------
+const fmtTime = (t) => (t ? new Date(t).toLocaleString() : '-');
+const smallBtn = 'style="padding: 0.3rem 0.6rem; font-size: 0.8rem;"';
+
+router.get('/admin/reconciliation', requireAdmin, async (req, res) => {
+  try {
+    const [runs, open, fixed, inbox, stuckInbox] = await Promise.all([
+      pool.query('SELECT * FROM recon_runs ORDER BY id DESC LIMIT 10'),
+      pool.query("SELECT * FROM recon_issues WHERE status='OPEN' ORDER BY last_seen_at DESC LIMIT 200"),
+      pool.query("SELECT * FROM recon_issues WHERE status='AUTO_FIXED' ORDER BY id DESC LIMIT 50"),
+      pool.query('SELECT status, COUNT(*)::int AS n FROM webhook_inbox GROUP BY status ORDER BY status'),
+      pool.query(`SELECT id, provider, provider_event_id, status, attempts, next_retry_at, failure_reason
+                    FROM webhook_inbox WHERE status IN ('FAILED','DEAD','PROCESSING')
+                    ORDER BY received_at DESC LIMIT 50`),
+    ]);
+
+    const details = (d) => `<code style="font-size:0.75rem;white-space:pre-wrap">${esc(JSON.stringify(d))}</code>`;
+    const runRows = runs.rows.map((r) => `
+      <tr><td>#${r.id}</td><td>${esc(r.trigger)}</td><td>${fmtTime(r.started_at)}</td>
+        <td>${r.finished_at ? fmtTime(r.finished_at) : '<span style="color:#d29922">running…</span>'}</td>
+        <td>${r.error ? `<span class="err">${esc(r.error)}</span>` : details(r.summary)}</td></tr>`).join('');
+    const openRows = open.rows.map((i) => `
+      <tr><td><strong>${esc(i.kind)}</strong><br><small>${esc(i.provider || '')}</small></td>
+        <td><code>${esc(i.ref)}</code>${i.order_id ? `<br><small>order ${esc(i.order_id)}</small>` : ''}</td>
+        <td>${details(i.details)}</td>
+        <td><small>first ${fmtTime(i.first_seen_at)}<br>last ${fmtTime(i.last_seen_at)}</small></td>
+        <td><form hx-post="/admin/reconciliation/issues/${i.id}/resolve" hx-swap="none" hx-on::after-request="location.reload()">
+          <button class="alt" type="submit" ${smallBtn}>Resolve</button></form></td></tr>`).join('');
+    const fixedRows = fixed.rows.map((i) => `
+      <tr><td><strong>${esc(i.kind)}</strong></td><td><code>${esc(i.ref)}</code></td>
+        <td>${details(i.details)}</td><td><small>${fmtTime(i.first_seen_at)} (run #${i.first_run_id})</small></td></tr>`).join('');
+    const inboxCounts = inbox.rows.map((r) => `<strong>${esc(r.status)}</strong>: ${r.n}`).join(' &middot; ');
+    const inboxRows = stuckInbox.rows.map((w) => `
+      <tr><td>#${w.id}</td><td>${esc(w.provider)}<br><code>${esc(w.provider_event_id)}</code></td>
+        <td>${esc(w.status)}</td><td>${w.attempts}</td><td><small>${fmtTime(w.next_retry_at)}</small></td>
+        <td><small>${esc(w.failure_reason || '')}</small></td>
+        <td>${['DEAD', 'FAILED'].includes(w.status) ? `<form hx-post="/admin/webhooks/${w.id}/retry" hx-swap="none" hx-on::after-request="location.reload()">
+          <button class="alt" type="submit" ${smallBtn}>Retry now</button></form>` : ''}</td></tr>`).join('');
+
+    const table = (head, rows, empty) => rows
+      ? `<table style="width:100%;font-size:0.85rem"><thead><tr>${head.map((h) => `<th style="text-align:left">${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`
+      : `<p style="color:#5B5F6E">${empty}</p>`;
+
+    const body = `
+      <h2>Reconciliation</h2>
+      <div class="card" style="margin-bottom:1.5rem">
+        <p style="color:#5B5F6E;margin-bottom:0.75rem">Compares payment-provider records with the ledger and orders.
+          Safe differences are repaired automatically by replaying the missing provider event; the rest are listed below.</p>
+        <form hx-post="/admin/reconciliation/run" hx-swap="none" hx-on::after-request="location.reload()" hx-disabled-elt="find button">
+          <button type="submit">Run reconciliation now</button>
+        </form>
+      </div>
+      <div class="card" style="margin-bottom:1.5rem"><h3>Open issues (${open.rows.length})</h3>
+        ${table(['Kind', 'Reference', 'Details', 'Seen', ''], openRows, 'No open issues.')}</div>
+      <div class="card" style="margin-bottom:1.5rem"><h3>Recent automatic fixes</h3>
+        ${table(['Kind', 'Reference', 'Details', 'When'], fixedRows, 'Nothing has been repaired yet.')}</div>
+      <div class="card" style="margin-bottom:1.5rem"><h3>Webhook inbox</h3>
+        <p style="margin-bottom:0.75rem">${inboxCounts || 'empty'}</p>
+        ${table(['Row', 'Event', 'Status', 'Attempts', 'Next retry', 'Last error', ''], inboxRows, 'No failed or in-flight webhooks.')}</div>
+      <div class="card"><h3>Recent runs</h3>
+        ${table(['Run', 'Trigger', 'Started', 'Finished', 'Summary'], runRows, 'No runs yet.')}</div>`;
+    res.send(layout('Reconciliation', body, req.user));
+  } catch (err) {
+    console.error('Error rendering reconciliation page:', err);
+    res.status(500).send('Internal Server Error');
+  }
+});
+
+router.post('/admin/reconciliation/run', requireAdmin, async (req, res) => {
+  try {
+    const out = await req.app.locals.reconciler.run({ trigger: `manual:${req.user.email}` });
+    res.status(out.error ? 500 : 200).json({ runId: out.runId, error: out.error, summary: out.summary });
+  } catch (err) {
+    console.error('Error running reconciliation:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/admin/reconciliation/issues/:id/resolve', requireAdmin, async (req, res) => {
+  await pool.query(
+    `UPDATE recon_issues SET status='RESOLVED', resolved_at=now(), resolved_by=$2, note=$3
+      WHERE id=$1 AND status='OPEN'`,
+    [req.params.id, `admin:${req.user.email}`, (req.body && req.body.note) || null]
+  );
+  res.status(200).end();
+});
+
+router.post('/admin/webhooks/:id/retry', requireAdmin, async (req, res) => {
+  const { requeueWebhook } = require('../payment/retryWorker');
+  const ok = await requeueWebhook(req.params.id);
+  res.status(ok ? 200 : 409).end();
 });
 
 module.exports = router;

@@ -168,18 +168,93 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
     return { providerRefundId: refund.id };
   }
 
-  async listTransactions({ since }) {
-    const { items } = await this.#client.payments.all({
-      from: Math.floor(new Date(since).getTime() / 1000),
-    });
+  // ---- M6 reconciliation ----------------------------------------------------------
+  get supportsReconciliation() {
+    return true;
+  }
 
-    return items.map((p) => ({
+  // Provider-neutral view of a Razorpay payment entity (ProviderTxn).
+  #toTxn(p) {
+    return {
       providerPaymentId: p.id,
       amount: p.amount / 100,
+      amountMinor: p.amount,
       currency: p.currency,
-      status: p.status,
+      status: p.status, // created | authorized | captured | refunded | failed
+      paid: p.status === "captured" || p.status === "refunded" || Boolean(p.captured),
+      amountRefundedMinor: p.amount_refunded || 0,
+      orderRef: p.notes?.orderId || p.notes?.orderRef || null,
       occurredAt: new Date(p.created_at * 1000).toISOString(),
+      raw: p,
+    };
+  }
+
+  async listTransactions({ since }) {
+    const from = Math.floor(new Date(since).getTime() / 1000);
+    const out = [];
+    // Razorpay returns at most 100 payments per call: page with skip.
+    for (let skip = 0; ; skip += 100) {
+      const { items = [] } = await this.#client.payments.all({ from, count: 100, skip });
+      out.push(...items.map((p) => this.#toTxn(p)));
+      if (items.length < 100) break;
+    }
+    return out;
+  }
+
+  // Refunds created since `since`. Razorpay's payment LIST lags behind refunds (a just-refunded
+  // payment can still show status "captured", amount_refunded 0), so reconciliation uses this
+  // list to decide which payments need their refunds checked.
+  async listRefunds({ since }) {
+    const from = Math.floor(new Date(since).getTime() / 1000);
+    const out = [];
+    for (let skip = 0; ; skip += 100) {
+      const { items = [] } = await this.#client.refunds.all({ from, count: 100, skip });
+      out.push(...items.map((r) => ({
+        providerRefundId: r.id, providerPaymentId: r.payment_id, amountMinor: r.amount, status: r.status, raw: r,
+      })));
+      if (items.length < 100) break;
+    }
+    return out;
+  }
+
+  async fetchPayment(providerPaymentId) {
+    try {
+      return this.#toTxn(await this.#client.payments.fetch(providerPaymentId));
+    } catch (e) {
+      if (e.statusCode === 400 || e.statusCode === 404) return null; // unknown id
+      throw e;
+    }
+  }
+
+  async fetchRefunds(providerPaymentId) {
+    const { items = [] } = await this.#client.payments.fetchMultipleRefund(providerPaymentId, { count: 100 });
+    return items.map((r) => ({
+      providerRefundId: r.id,
+      amountMinor: r.amount,
+      status: r.status, // pending | processed | failed
+      raw: r,
     }));
+  }
+
+  // Same shape as Razorpay's own webhooks, so normalize() and the processor treat a
+  // replayed event exactly like the lost one.
+  recoveryEvent(kind, txn, refund = null) {
+    if (kind === "purchase") {
+      return {
+        eventKey: `payment.captured:${txn.providerPaymentId}`,
+        payload: { event: "payment.captured", payload: { payment: { entity: txn.raw } } },
+      };
+    }
+    if (kind === "refund") {
+      return {
+        eventKey: `refund.created:${refund.providerRefundId}`,
+        payload: {
+          event: "refund.created",
+          payload: { refund: { entity: refund.raw }, payment: { entity: txn.raw } },
+        },
+      };
+    }
+    throw new Error(`unknown recovery event kind: ${kind}`);
   }
 }
 

@@ -32,7 +32,6 @@ router.post(
     let payload;
     try {
       payload = JSON.parse(rawBody);
-      console.log(payload);
     } catch {
       return res.status(400).json({ error: "Invalid JSON" });
     }
@@ -64,13 +63,22 @@ router.post(
     });
     try {
       const result = await processor.process(row, adapter);
+      if (result.outcome === "FAILED") {
+        console.warn(`[webhook] ${adapter.name}:${providerEventId} failed (${result.retryable ? "retryable" : "permanent"}):`, result.reason);
+        // M2: an event that arrived too early (e.g. refund before its purchase) or hit a
+        // transient error gets a non-2xx so the provider re-sends it; the stored row is also
+        // retried by the retry worker. Permanent failures answer 200: re-sending the same
+        // payload cannot help, and providers disable endpoints that keep failing.
+        if (result.retryable) {
+          return res.status(503).set("Retry-After", "60").json({ received: true, ...result });
+        }
+      }
       res.json({ received: true, ...result });
     } catch (e) {
-      // Never let one bad webhook crash the server: mark it FAILED and ask the provider to retry.
+      // Never let one bad webhook crash the server: record the failed attempt (backoff) and
+      // ask the provider to retry.
       console.error(`[webhook] ${adapter.name}:${providerEventId} failed:`, e.message);
-      await pool
-        .query(`UPDATE webhook_inbox SET status='FAILED', processed_at=now(), failure_reason=$2 WHERE id=$1`, [row.id, e.message])
-        .catch(() => {});
+      await processor.markFailed(row.id, e.message).catch(() => {});
       res.status(500).json({ received: false, error: "processing failed" });
     }
   },

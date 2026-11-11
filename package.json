@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "scripts": {
     "start": "node src/server.js",
-    "verify": "node src/domain/verify-pg.js",
-    "db:init": "dotenv -- sh -c 'psql \"$DATABASE_URL\" -f db/schema.sql' "
+    "verify": "node src/domain/verify-pg.js && node src/payment/verify-m2-m6.js",
+    "db:init": "dotenv -- sh -c 'psql \"$DATABASE_URL\" -f db/schema.sql' ",
+    "verify:m2m6": "node src/payment/verify-m2-m6.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

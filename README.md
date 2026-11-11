@@ -44,6 +44,13 @@ cd mock-provider && npm start      # optional mock payment provider on :3001
 
 Then open http://localhost:3000/login, register an account, and visit `/courses`. Admin pages are at `/admin`.
 
+## Webhook retries and reconciliation
+
+- **Retries (M2):** every webhook is stored in `webhook_inbox` before processing. Failed rows are retried in the background with exponential backoff (30 s, 60 s, … capped at 1 h) and become `DEAD` after 8 attempts. A refund that arrives before its purchase gets HTTP 503 so the provider re-sends it.
+- **Reconciliation (M6):** every 15 minutes (and on demand at `/admin/reconciliation`) the app compares Razorpay's payments and refunds with the ledger. Lost payment/refund webhooks and stuck `REFUND_PENDING` orders are repaired by replaying the missing provider event through the normal webhook pipeline; amount mismatches, partial refunds, unknown payments, failed refunds and dead webhooks are listed for an admin. The mock provider only gets the database-side checks.
+
+Settings are in `.env.example` (all optional).
+
 ## Project structure
 
 ```
@@ -60,5 +67,5 @@ src/views.js         HTML templates
 ## Verification
 
 ```bash
-npm run verify       # runs ledger checks against Postgres
+npm run verify       # ledger checks + webhook retry / reconciliation checks against Postgres
 ```

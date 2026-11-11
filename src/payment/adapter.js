@@ -60,5 +60,36 @@ class PaymentProviderAdapter {
   async listTransactions({ since }) {
     throw new Error("not implemented");
   }
+
+  // ---- M6 reconciliation (optional) -------------------------------------------------
+  // Adapters that can be asked "what really happened?" return true and implement the
+  // methods below. Others only get the provider-independent (database) checks.
+  get supportsReconciliation() {
+    return false;
+  }
+
+  /** One payment as a ProviderTxn (see listTransactions), or null if the provider has none. */
+  async fetchPayment(providerPaymentId) {
+    throw new Error("not implemented");
+  }
+
+  /** Refunds created since a date: [{ providerRefundId, providerPaymentId, amountMinor, status, raw }]. */
+  async listRefunds({ since }) {
+    throw new Error("not implemented");
+  }
+
+  /** Refunds of a payment: [{ providerRefundId, amountMinor, status, raw }]. */
+  async fetchRefunds(providerPaymentId) {
+    throw new Error("not implemented");
+  }
+
+  /**
+   * Rebuilds the webhook payload the provider would have sent, so a lost event can be
+   * replayed through the normal webhook pipeline (same deterministic ledger ids).
+   * kind: 'purchase' | 'refund'. Returns { eventKey, payload } (eventKey = inbox id suffix).
+   */
+  recoveryEvent(kind, txn, refund = null) {
+    throw new Error("not implemented");
+  }
 }
 module.exports = { PaymentProviderAdapter };
