@@ -181,7 +181,10 @@ router.post('/cart/remove', requireAuth, async (req, res) => {
       storedProductId,
     ]);
 
-    res.setHeader('HX-Trigger', 'cartUpdated');
+    // Fire cartUpdated only after the response has been swapped in: fired earlier (plain
+    // HX-Trigger), every course card starts reloading itself, including the one this response
+    // replaces, and that stale reload then fails with an htmx swapError ("o is null").
+    res.setHeader('HX-Trigger-After-Settle', 'cartUpdated');
     return res.status(200).set('HX-Redirect', '/cart').end();
   } catch (err) {
     console.error('[cart/remove] Error removing item from cart:', err);
@@ -494,7 +497,10 @@ router.post('/cart/add', requireAuth, async (req, res) => {
 
     await client.query('COMMIT');
 
-    res.setHeader('HX-Trigger', 'cartUpdated');
+    // Fire cartUpdated only after the response has been swapped in: fired earlier (plain
+    // HX-Trigger), every course card starts reloading itself, including the one this response
+    // replaces, and that stale reload then fails with an htmx swapError ("o is null").
+    res.setHeader('HX-Trigger-After-Settle', 'cartUpdated');
 
     if (isSubscription) {
       const subPriceInfo = await resolveSubscriptionPrice(req.user, storedProductId, catalog);
