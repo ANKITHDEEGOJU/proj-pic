@@ -62,8 +62,17 @@ router.post(
     const processor = new WebhookProcessor({
       ledger: req.app.locals.engine.ledger,
     });
-    const result = await processor.process(row, adapter);
-    res.json({ received: true, ...result });
+    try {
+      const result = await processor.process(row, adapter);
+      res.json({ received: true, ...result });
+    } catch (e) {
+      // Never let one bad webhook crash the server: mark it FAILED and ask the provider to retry.
+      console.error(`[webhook] ${adapter.name}:${providerEventId} failed:`, e.message);
+      await pool
+        .query(`UPDATE webhook_inbox SET status='FAILED', processed_at=now(), failure_reason=$2 WHERE id=$1`, [row.id, e.message])
+        .catch(() => {});
+      res.status(500).json({ received: false, error: "processing failed" });
+    }
   },
 );
 

@@ -31,7 +31,7 @@ class PaymentService {
     return { orderRef, providerPaymentId, redirectUrl, provider };
   }
 
-  async initiateRefund({ userId, productId, amount, providerPaymentId, provider = "mock" }) {
+  async initiateRefund({ userId, productId, orderId, amount, providerPaymentId, provider = "mock" }) {
     const p = (productId && this.catalog) ? this.catalog.get(productId) : null;
 
     if (!p && amount === undefined) {
@@ -44,6 +44,7 @@ class PaymentService {
 
     const { providerRefundId } = await adapter.refund({
       providerPaymentId,
+      orderId, // lets the provider's refund webhook point back at our order
       amount: finalAmount,
       currency,
       userId,

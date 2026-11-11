@@ -5,6 +5,7 @@ const pool = require('../db');
 const { requireAuth } = require('../auth');
 const { layout, courseCard, subscriptionCard, accessFragment, activityPage } = require('../views');
 const { resolveSubscriptionPrice } = require('../services/pricingEngine');
+const { isRefundPending } = require('../services/refundStatus');
 
 // Helper to look up catalog item by id or slug safely
 function resolveCatalogProduct(catalog, key) {
@@ -43,7 +44,9 @@ router.get('/courses/subscription-banner', requireAuth, async (req, res) => {
       subEnt.status === 'ACTIVE' &&
       (!subEnt.expiresAt || new Date(subEnt.expiresAt).getTime() > Date.now());
 
-    res.send(subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt));
+    const { ledger } = req.app.locals.engine;
+    const refundPending = isSubActive && (await isRefundPending(ledger, subEnt.refundableEventId));
+    res.send(subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, { refundPending }));
   } catch (err) {
     console.error('Error fetching subscription banner:', err);
     res.status(500).end();
@@ -73,21 +76,26 @@ router.get('/courses', requireAuth, async (req, res) => {
       subEnt.status === 'ACTIVE' &&
       (!subEnt.expiresAt || new Date(subEnt.expiresAt).getTime() > Date.now());
 
-    const subBanner = subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt);
+    const { ledger } = req.app.locals.engine;
+    const subRefundPending = isSubActive && (await isRefundPending(ledger, subEnt.refundableEventId));
+    const subBanner = subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, { refundPending: subRefundPending });
 
     const courseProducts =
       typeof catalog.listCourses === 'function'
         ? catalog.listCourses()
         : catalog.list().filter((p) => p.type === 'COURSE');
 
-    const cards = courseProducts
-      .map((p) => {
-        const slug = p.slug || p.id;
-        const d = decisions.evaluateAccess(req.user.id, slug);
-        const inCart = cart.includes(slug);
-        return courseCard(p, d, '', false, inCart);
-      })
-      .join('');
+    const cards = (
+      await Promise.all(
+        courseProducts.map(async (p) => {
+          const slug = p.slug || p.id;
+          const d = decisions.evaluateAccess(req.user.id, slug);
+          const inCart = cart.includes(slug);
+          const pending = d.reason === 'ACTIVE_PURCHASE' && (await isRefundPending(ledger, d.sourceEventIds[0]));
+          return courseCard(p, d, '', pending, inCart);
+        })
+      )
+    ).join('');
 
     const body = `<h2>Courses</h2>${subBanner}${cards}`;
     res.send(layout('Courses', body, req.user, cart.length));
@@ -113,7 +121,9 @@ router.get('/courses/:slug/card', requireAuth, async (req, res) => {
     const d = decisions.evaluateAccess(req.user.id, slug);
     const inCart = cart.includes(slug);
 
-    res.send(courseCard(p, d, '', d.allowed, inCart));
+    // "Refund pending" only while the order really is REFUND_PENDING (was: whenever owned).
+    const pending = d.reason === 'ACTIVE_PURCHASE' && (await isRefundPending(req.app.locals.engine.ledger, d.sourceEventIds[0]));
+    res.send(courseCard(p, d, '', pending, inCart));
   } catch (err) {
     console.error('Error polling card status:', err);
     res.status(500).end();

@@ -4,7 +4,7 @@ const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
 const { subscriptionCard, courseCard, layout, esc, navCart } = require('../views');
-const { resolveSubscriptionPrice, validateCoupon } = require('../services/pricingEngine');
+const { resolveSubscriptionPrice, validateCoupon, allocatePaidCents } = require('../services/pricingEngine');
 const { PaymentService } = require('../payment/service');
 
 // Helper to look up catalog item by id or slug safely
@@ -366,11 +366,15 @@ router.post('/cart/checkout', async (req, res) => {
 
     const orderId = orderRes.rows[0].id;
 
-    for (const item of cartItems) {
+    const paidCents = allocatePaidCents(
+      cartItems.map((i) => i.priceCents * (i.quantity || 1)),
+      finalPayableCents
+    );
+    for (const [idx, item] of cartItems.entries()) {
       await client.query(
         `INSERT INTO order_line_items (
-          order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           orderId,
           item.item_type,
@@ -379,6 +383,7 @@ router.post('/cart/checkout', async (req, res) => {
           item.quantity,
           item.duration_days,
           item.scope,
+          paidCents[idx],
         ]
       );
     }

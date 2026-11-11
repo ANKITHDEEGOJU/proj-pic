@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS order_line_items (
 -- Index for fast webhook joins
 CREATE INDEX IF NOT EXISTS idx_order_line_items_order_id ON order_line_items(order_id);
 
+-- What the customer actually paid for each line after order-level coupons
+-- (sums exactly to orders.final_payable_cents). NULL on orders created before this column.
+ALTER TABLE order_line_items ADD COLUMN IF NOT EXISTS paid_cents INT;
+
 -- -----------------------------------------------------------------------------
 -- 6. Commerce Ledger Table (Append-Only Source of Truth)
 -- -----------------------------------------------------------------------------
@@ -128,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_order_line_items_order_id ON order_line_items(ord
 CREATE TABLE IF NOT EXISTS commerce_ledger (
   ledger_sequence_id BIGSERIAL PRIMARY KEY,
   event_id           TEXT        NOT NULL UNIQUE,
-  event_type         TEXT        NOT NULL CHECK (event_type IN ('PURCHASE_SUCCEEDED','PURCHASE_FAILED','REFUND')),
+  event_type         TEXT        NOT NULL,
   user_id            UUID        NOT NULL REFERENCES users(id),
   product_id         TEXT        NOT NULL,
   quantity           INTEGER     NOT NULL CHECK (quantity > 0),
@@ -138,18 +142,44 @@ CREATE TABLE IF NOT EXISTS commerce_ledger (
   reference_event_id TEXT        REFERENCES commerce_ledger(event_id),
   product_snapshot   JSONB       NOT NULL,
   payment_info       JSONB       NOT NULL DEFAULT '{}',
-  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK ((event_type = 'REFUND') = (reference_event_id IS NOT NULL))
+  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- At most one refund per purchase, enforced under concurrency
-CREATE UNIQUE INDEX IF NOT EXISTS uq_one_refund_per_purchase
-  ON commerce_ledger (reference_event_id) WHERE event_type = 'REFUND';
+-- M1: provider-neutral transaction model.
+-- Written as ALTERs so re-running this file upgrades an existing database.
+-- (ALTER TABLE does not fire the append-only row triggers below.)
+ALTER TABLE commerce_ledger ADD COLUMN IF NOT EXISTS source      TEXT  NOT NULL DEFAULT 'PAYMENT';
+ALTER TABLE commerce_ledger ADD COLUMN IF NOT EXISTS actor       TEXT;
+ALTER TABLE commerce_ledger ADD COLUMN IF NOT EXISTS reason      TEXT;
+ALTER TABLE commerce_ledger ADD COLUMN IF NOT EXISTS entitlement JSONB; -- {kind, scope, durationDays, expiresAt}
+
+ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_event_type_check;
+ALTER TABLE commerce_ledger ADD  CONSTRAINT commerce_ledger_event_type_check CHECK (event_type IN (
+  'PURCHASE_SUCCEEDED','PURCHASE_FAILED','REFUND','CHARGEBACK',
+  'MANUAL_GRANT','MANUAL_REVOKE',
+  'SUBSCRIPTION_STARTED','SUBSCRIPTION_RENEWED','SUBSCRIPTION_CANCELLED',
+  'SEAT_ASSIGNED','SEAT_UNASSIGNED'));
+
+ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_source_check;
+ALTER TABLE commerce_ledger ADD  CONSTRAINT commerce_ledger_source_check
+  CHECK (source IN ('PAYMENT','ADMIN','SCHOLARSHIP','ORG_SEAT','SYSTEM'));
+
+-- Reversals and cancellations must point at an earlier event; nothing else may.
+ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_check;           -- old REFUND-only rule
+ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_reference_check;
+ALTER TABLE commerce_ledger ADD  CONSTRAINT commerce_ledger_reference_check CHECK (
+  (event_type IN ('REFUND','CHARGEBACK','MANUAL_REVOKE','SEAT_UNASSIGNED','SUBSCRIPTION_CANCELLED'))
+  = (reference_event_id IS NOT NULL));
+
+-- At most one reversal (refund, chargeback, revoke, unassign) per event, enforced under concurrency
+DROP INDEX IF EXISTS uq_one_refund_per_purchase;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_one_reversal_per_event
+  ON commerce_ledger (reference_event_id)
+  WHERE event_type IN ('REFUND','CHARGEBACK','MANUAL_REVOKE','SEAT_UNASSIGNED');
 
 CREATE INDEX IF NOT EXISTS ix_ledger_user_product
   ON commerce_ledger (user_id, product_id, ledger_sequence_id);
 
--- Prevent UPDATE / DELETE / TRUNCATE on commerce_ledger
 -- Prevent UPDATE / DELETE / TRUNCATE on commerce_ledger
 CREATE OR REPLACE FUNCTION ledger_append_only() RETURNS trigger AS $$
 BEGIN

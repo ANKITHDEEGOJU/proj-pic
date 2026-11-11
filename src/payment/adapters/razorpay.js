@@ -29,8 +29,9 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
       },
     });
 
-    const base = process.env.RAZORPAY_CHECKOUT_URL || "";
-    const redirectUrl = `${base}/razorpay/checkout?orderId=${order.id}&userId=${encodeURIComponent(
+    // The checkout page is served by this app, so keep the redirect relative: an absolute
+    // URL on another host (e.g. the ngrok tunnel) loses the auth cookie and lands on /login.
+    const redirectUrl = `/razorpay/checkout?orderId=${encodeURIComponent(order.id)}&userId=${encodeURIComponent(
       userId
     )}&productId=${encodeURIComponent(productId)}&amount=${amount}&currency=${currency}`;
 
@@ -40,6 +41,7 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
   // Extract unique provider event ID for inbox idempotency
   extractEventId(payload) {
     const entityId =
+      payload.payload?.dispute?.entity?.id ||
       payload.payload?.refund?.entity?.id ||
       payload.payload?.payment?.entity?.id;
     if (!entityId) return null;
@@ -69,8 +71,13 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
     const typeMap = {
       "payment.captured": "PURCHASE_SUCCEEDED",
       "payment.failed": "PURCHASE_FAILED",
+      // A refund counts once Razorpay ACCEPTS it (refund.created): test-mode refunds stay
+      // "pending" and never reach refund.processed. Both map to the same ledger event id,
+      // so whichever arrives second is a duplicate. refund.failed is flagged for review.
       "refund.created": "REFUND",
       "refund.processed": "REFUND",
+      "refund.failed": "REFUND_FAILED",
+      "payment.dispute.lost": "CHARGEBACK", // dispute lost = money taken back by the bank
     };
 
     const eventType = typeMap[payload.event];
@@ -78,7 +85,8 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
 
     const payment = payload.payload?.payment?.entity;
     const refund = payload.payload?.refund?.entity;
-    const entity = refund || payment;
+    const dispute = payload.payload?.dispute?.entity;
+    const entity = dispute || refund || payment;
 
     if (!entity) return null;
 
@@ -92,17 +100,19 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
     const orderRef = orderId;
 
     // Resolve payment & refund IDs
-    const paymentId = payment?.id || refund?.payment_id || entity.id;
-    const refundId = refund?.id || (eventType === "REFUND" ? entity.id : null);
+    const paymentId = payment?.id || refund?.payment_id || dispute?.payment_id || entity.id;
+    const refundId = refund?.id || null; // refund.* webhooks always carry the refund entity
 
     // Deterministic event IDs for L3 ledger idempotency
+    const isReversal = eventType === "REFUND" || eventType === "CHARGEBACK";
     const ledgerEventId =
-      eventType === "REFUND"
-        ? `razorpay:${refundId || paymentId}`
-        : `razorpay:${paymentId}`;
+      eventType === "CHARGEBACK"
+        ? `razorpay:${dispute?.id || `dispute_${paymentId}`}`
+        : eventType === "REFUND"
+          ? `razorpay:${refundId || paymentId}`
+          : `razorpay:${paymentId}`;
 
-    const referenceeventId =
-      eventType === "REFUND" ? `razorpay:${paymentId}` : null;
+    const referenceeventId = isReversal ? `razorpay:${paymentId}` : null;
 
     return {
       eventId: ledgerEventId,
@@ -120,6 +130,7 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
       _raw: {
         providerPaymentId: paymentId,
         providerRefundId: refundId,
+        providerDisputeId: dispute?.id || null,
         orderId,
         orderRef,
         notes,

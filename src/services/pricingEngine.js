@@ -40,6 +40,28 @@ function checkUserEligibility(userEmail, targets) {
  * Tier 2: Specific Email Domain Override
  * Tier 3: Global Baseline Default
  */
+/**
+ * Splits an order's final payable amount across its lines in proportion to each line's
+ * price, so every line knows what was really paid for it (after coupons).
+ * Uses largest-remainder rounding so the parts always add up to exactly `finalCents`.
+ * @param {number[]} lineCents  undiscounted price of each line (unit price * quantity)
+ * @param {number} finalCents   what the customer pays for the whole order
+ * @returns {number[]} paid cents per line, same order as `lineCents`
+ */
+function allocatePaidCents(lineCents, finalCents) {
+  const total = lineCents.reduce((a, b) => a + b, 0);
+  if (lineCents.length === 0) return [];
+  if (total <= 0) return lineCents.map((_, i) => (i === 0 ? finalCents : 0));
+  const exact = lineCents.map((c) => (c * finalCents) / total);
+  const parts = exact.map(Math.floor);
+  let left = finalCents - parts.reduce((a, b) => a + b, 0);
+  exact
+    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+    .sort((a, b) => b.frac - a.frac)
+    .forEach(({ i }) => { if (left > 0) { parts[i] += 1; left -= 1; } });
+  return parts;
+}
+
 async function resolveSubscriptionPrice(user, productId = 'sub_monthly', catalog = null) {
   // 1. Get base product defaults from catalog (fallback if DB has no rules)
   const catalogItem = catalog ? catalog.get(productId) : null;
@@ -239,5 +261,6 @@ module.exports = {
 getRuleStatus,
 checkUserEligibility,
 resolveSubscriptionPrice,
+allocatePaidCents,
 validateCoupon
 };

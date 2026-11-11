@@ -30,7 +30,7 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
 
   // Extract payment or refund ID from mock webhook payloads
   extractEventId(payload) {
-    return payload.providerRefundId || payload.providerPaymentId || payload.eventId || null;
+    return payload.providerChargebackId || payload.providerRefundId || payload.providerPaymentId || payload.eventId || null;
   }
 
   // Header signature verification with safe fallback
@@ -49,6 +49,7 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
       amount, 
       currency, 
       providerRefundId,
+      providerChargebackId,
       orderRef,
       orderId
     } = payload;
@@ -56,13 +57,16 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
     const typeMap = { 
       'payment.succeeded': 'PURCHASE_SUCCEEDED', 
       'payment.failed': 'PURCHASE_FAILED', 
-      'refund.succeeded': 'REFUND' 
+      'refund.succeeded': 'REFUND',      // mock refunds succeed straight away (= Razorpay refund.processed)
+      'refund.failed': 'REFUND_FAILED',
+      'chargeback.created': 'CHARGEBACK'
     };
 
     const eventType = typeMap[mockType];
     if (!eventType) return null; // Ignorable event
 
-    const providerEventId = providerRefundId || providerPaymentId;
+    const providerEventId = providerChargebackId || providerRefundId || providerPaymentId;
+    const isReversal = eventType === 'REFUND' || eventType === 'CHARGEBACK';
     const payRecord = payments.get(providerPaymentId);
     
     // Resolve orderRef from payload or in-memory map fallback
@@ -77,17 +81,18 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
       amount: Number(amount ?? payRecord?.amount ?? 0),
       currency: currency || payRecord?.currency || 'USD',
       occurredAt: payload.occurredAt || new Date().toISOString(),
-      referenceeventId: eventType === 'REFUND' ? `mock:${providerPaymentId}` : null,
+      referenceeventId: isReversal ? `mock:${providerPaymentId}` : null,
       _raw: { 
         providerPaymentId, 
         providerRefundId: providerRefundId || null,
+        providerChargebackId: providerChargebackId || null,
         orderRef: resolvedOrderRef,
         orderId: resolvedOrderRef
       },
     };
   }
 
-async refund({ providerPaymentId, amount, currency, userId, productId }) {
+async refund({ providerPaymentId, amount, currency, userId, productId, orderId }) {
     // 1. Strip 'mock:' prefix if present
     const cleanId = providerPaymentId ? String(providerPaymentId).replace(/^mock:/, '') : providerPaymentId;
     
@@ -96,7 +101,7 @@ async refund({ providerPaymentId, amount, currency, userId, productId }) {
     // 2. Fallback: If in-memory map lost the reference across sessions/restarts, auto-recreate the mock stub
     if (!pay) {
       pay = {
-        orderRef: `order_${randomUUID()}`,
+        orderRef: orderId || null, // real order id from the caller (never a made-up one)
         userId,
         productId,
         amount,
@@ -107,33 +112,34 @@ async refund({ providerPaymentId, amount, currency, userId, productId }) {
       payments.set(cleanId, pay);
     }
 
+    if (orderId) pay.orderRef = orderId;
     if (pay.status === 'REFUNDED') throw new Error('Mock: already refunded');
 
-    pay.status = 'REFUNDED';
     const providerRefundId = `mock_ref_${randomUUID()}`;
-    pay.providerRefundId = providerRefundId;
-
     const base = process.env.MOCK_PROVIDER_URL || 'http://localhost:3000';
+    // Like a real provider API: if the provider can't be reached or says no, the refund FAILS
+    // (the caller reopens the order) instead of pretending it went through.
+    let r;
     try {
-      await fetch(`${base}/refund/${cleanId}`, {
-        method: 'POST', 
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-mock-secret': MOCK_SECRET
-        },
-        body: JSON.stringify({ 
-          userId: userId || pay.userId, 
-          productId: productId || pay.productId, 
-          amount, 
-          currency, 
+      r = await fetch(`${base}/refund/${cleanId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET },
+        body: JSON.stringify({
+          userId: userId || pay.userId,
+          productId: productId || pay.productId,
+          amount,
+          currency,
           providerRefundId,
           orderRef: pay.orderRef
         }),
       });
     } catch (err) {
-      console.warn('[MockAdapter] Refund webhook dispatch note:', err.message);
+      throw new Error(`mock provider unreachable (${err.cause?.code || err.message})`);
     }
+    if (!r.ok) throw new Error(`mock provider returned HTTP ${r.status}`);
 
+    pay.status = 'REFUNDED';
+    pay.providerRefundId = providerRefundId;
     return { providerRefundId };
   }
   async listTransactions({ since }) {

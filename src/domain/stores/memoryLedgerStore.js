@@ -1,10 +1,10 @@
 "use strict";
-const { deepFreeze, sameEvent } = require("../util");
+const { deepFreeze, sameEvent, EVENT_EFFECT } = require("../util");
 // LedgerStore contract implementation for tests/prototyping. Same interface as PgLedgerStore.
 class MemoryLedgerStore {
   #records = [];
   #byId = new Map();
-  #refunded = new Set();
+  #reversedBy = new Map(); // referenced eventId -> reversing event type
   #seq = 0;
   async append({ event, productSnapshot, paymentInfo }) {
     const ex = this.#byId.get(event.eventId);
@@ -18,8 +18,8 @@ class MemoryLedgerStore {
     });
     this.#records.push(record);
     this.#byId.set(event.eventId, record);
-    if (event.eventType === "REFUND")
-      this.#refunded.add(event.referenceeventId);
+    if (EVENT_EFFECT[event.eventType] === "REVOKE")
+      this.#reversedBy.set(event.referenceeventId, event.eventType);
     return { inserted: true, record };
   }
   async getAll() {
@@ -28,8 +28,8 @@ class MemoryLedgerStore {
   async getByEventId(id) {
     return this.#byId.get(id) ?? null;
   }
-  async hasRefundFor(id) {
-    return this.#refunded.has(id);
+  async findReversalOf(id) {
+    return this.#reversedBy.get(id) ?? null;
   }
   async count() {
     return this.#records.length;

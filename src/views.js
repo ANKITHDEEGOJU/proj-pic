@@ -191,6 +191,8 @@ const authForm = (kind) => `
 <div id="msg" class="err"></div>
 <p>${kind === 'login' ? '<a href="/register">Need an account?</a>' : '<a href="/login">Have an account?</a>'}</p>`;
 
+const FREE_GRANTS = ['MANUAL_GRANT', 'SEAT_ASSIGNED'];
+
 const courseCard = (p, d, msg = '', pending = false, inCart = false) => {
   const s = esc(p.slug || p.id),
     id = `c-${s}`,
@@ -204,7 +206,13 @@ const courseCard = (p, d, msg = '', pending = false, inCart = false) => {
     ? '<span class="ok">Owned</span>'
     : d.reason === 'PURCHASE_REFUNDED'
       ? '<span class="err">Refunded</span>'
-      : '';
+      : d.reason === 'PURCHASE_CHARGED_BACK'
+        ? '<span class="err">Charged back</span>'
+        : d.reason === 'ACCESS_REVOKED' || d.reason === 'SEAT_UNASSIGNED'
+          ? '<span class="err">Revoked</span>'
+          : d.reason === 'SUBSCRIPTION_EXPIRED' || d.reason === 'ENTITLEMENT_EXPIRED'
+            ? `<span class="err">Expired${d.expiresAt ? ' ' + esc(new Date(d.expiresAt).toLocaleDateString()) : ''}</span>`
+            : '';
 
   const triggers = pending
     ? 'every 2s, cartUpdated from:body'
@@ -227,11 +235,19 @@ const courseCard = (p, d, msg = '', pending = false, inCart = false) => {
 <strong>$${formattedPrice} ${currencyStr}</strong><br>
 ${
   d.allowed
-    ? `<button hx-post="/courses/${s}/checkout/refund" ${t}>Refund</button> <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button>
+    ? `${
+        // Only a paid, directly bought course can be refunded from its own card.
+        d.reason === 'ACTIVE_PURCHASE' && !FREE_GRANTS.includes(d.grantedVia)
+          ? `<button hx-post="/courses/${s}/checkout/refund" ${t}>Refund</button>`
+          : d.reason === 'ACTIVE_SUBSCRIPTION_PASS'
+            ? '<small style="color:#2e7d32">Included in your All-Access Pass</small>'
+            : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
+      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
-    : inCart
+    : (inCart
       ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
-      : `<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`
+      : `<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`)
+      + (msg ? `<div class="msg">${esc(msg)}</div>` : '') // e.g. "Refund processed. Access revoked."
 }
 </div>`;
 };
@@ -240,7 +256,8 @@ const subscriptionCard = (
   inCart = false,
   subPriceInfo = null,
   isSubActive = false,
-  subEnt = null
+  subEnt = null,
+  opts = {} // { refundPending, message }
 ) => {
   const id = 'sub-card';
   const targetAttr = `hx-target="#${id}" hx-swap="outerHTML"`;
@@ -259,8 +276,23 @@ const subscriptionCard = (
       ? new Date(subEnt.expiresAt).toLocaleDateString()
       : 'Lifetime';
 
+    // Not refundable only when no period was paid for (all free grants).
+    const isFree = subEnt?.refundableEventId === null || (subEnt?.refundableEventId === undefined && FREE_GRANTS.includes(subEnt?.grantedVia));
+    const freeLabel = subEnt?.source === 'SCHOLARSHIP' ? 'Scholarship access' : 'Granted by admin';
+    const action = isFree
+      ? `<p style="margin-top:0.5rem;color:#33691e;font-size:0.85rem;">${freeLabel} &middot; not refundable</p>`
+      : opts.refundPending
+        ? `<button disabled style="margin-top:0.5rem;background:#5B5F6E;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:4px;">⏳ Refund pending…</button>
+  <div style="font-size:0.85rem;color:#5B5F6E;">Waiting for the payment provider to confirm. Access stays until then.</div>`
+        : `<form hx-post="/courses/${subProductId}/checkout/refund" ${targetAttr} style="margin-top: 0.5rem;">
+    <button type="submit" style="background: #d32f2f; color: #ffffff; border: none; padding: 0.5rem 1.2rem; border-radius: 4px; font-weight: bold; cursor: pointer;">
+      Refund Subscription
+    </button>
+  </form>`;
+    const trigger = opts.refundPending ? 'every 2s, cartUpdated from:body' : 'cartUpdated from:body';
+
     return `
-<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="cartUpdated from:body" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
+<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="${trigger}" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
   <div style="display: flex; justify-content: space-between; align-items: flex-start;">
     <div>
       <h3 style="margin-bottom: 0.25rem; color: #1b5e20;">✓ ${planTitle} (Active)</h3>
@@ -272,11 +304,8 @@ const subscriptionCard = (
       Active Pass
     </span>
   </div>
-  <form hx-post="/courses/${subProductId}/checkout/refund" ${targetAttr} style="margin-top: 0.5rem;">
-    <button type="submit" style="background: #d32f2f; color: #ffffff; border: none; padding: 0.5rem 1.2rem; border-radius: 4px; font-weight: bold; cursor: pointer;">
-      Refund Subscription
-    </button>
-  </form>
+  ${action}
+  ${opts.message ? `<div style="font-size:0.85rem;color:#c62828;margin-top:0.4rem;">${esc(opts.message)}</div>` : ''}
 </div>`;
   }
 
@@ -334,14 +363,14 @@ ${
     .join('') || '<tr><td colspan="5">None</td></tr>'
 }</table>
 <h2>Ledger (append-only)</h2>
-<table><tr><th>#</th><th>Type</th><th>Product</th><th>Amount</th><th>Event</th><th>Refs</th></tr>
+<table><tr><th>#</th><th>Type</th><th>Source</th><th>Product</th><th>Amount</th><th>Event</th><th>Refs</th></tr>
 ${
   records
     .map(
       (r) =>
-        `<tr><td>${r.ledgerSequenceId}</td><td>${esc(r.event.eventType)}</td><td>${esc(r.event.productId)}</td><td>${(r.event.amount || 0).toFixed(2)} ${esc(r.event.currency || 'USD')}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || '')}</td></tr>`
+        `<tr><td>${r.ledgerSequenceId}</td><td>${esc(r.event.eventType)}</td><td>${esc(r.event.source || 'PAYMENT')}${r.event.reason ? `<br><small>${esc(r.event.reason)}</small>` : ''}</td><td>${esc(r.event.productId)}</td><td>${(r.event.amount || 0).toFixed(2)} ${esc(r.event.currency || 'USD')}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || '')}</td></tr>`
     )
-    .join('') || '<tr><td colspan="6">No events</td></tr>'
+    .join('') || '<tr><td colspan="7">No events</td></tr>'
 }</table>`;
 
 const errorFragment = (msg) => `<span class="err">${esc(msg)}</span>`;

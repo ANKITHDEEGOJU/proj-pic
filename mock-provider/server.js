@@ -176,6 +176,7 @@ app.get("/pay/:providerPaymentId", (req, res) => {
         <input type="hidden" name="productId" value="${esc(product)}">
         <input type="hidden" name="amount" value="${esc(amount)}">
         <input type="hidden" name="currency" value="${esc(currency)}">
+        <input type="hidden" name="orderRef" value="${esc(ref || "")}">
         <button class="pay" name="action" value="pay">✅ Pay ${esc(amount)} ${esc(currency)}</button>
         <button class="fail" name="action" value="fail">❌ Simulate Failure</button>
         <button class="cancel" name="action" value="cancel">Cancel</button>
@@ -188,7 +189,7 @@ app.get("/pay/:providerPaymentId", (req, res) => {
 // User clicks Pay / Fail / Cancel.
 app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
   const { providerPaymentId } = req.params;
-  const { action, userId, productId, amount, currency } = req.body;
+  const { action, userId, productId, amount, currency, orderRef } = req.body;
   if (action === "cancel") return res.redirect(`${STREAMFLIX_URL}/courses`);
   const eventType = action === "pay" ? "payment.succeeded" : "payment.failed";
   // Fire webhook asynchronously; don't block the redirect.
@@ -199,6 +200,7 @@ app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
     productId,
     amount: Number(amount),
     currency,
+    orderRef: orderRef || undefined, // lets StreamFlix find the order without in-memory state
     occurredAt: new Date().toISOString(),
   });
  
@@ -224,11 +226,12 @@ app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
 // The mock adapter calls this internally, but a real provider would POST here themselves.
 app.post("/refund/:providerPaymentId", async (req, res) => {
   const { providerPaymentId } = req.params;
-  const { userId, productId, amount, currency, providerRefundId } = req.body;
+  const { userId, productId, amount, currency, providerRefundId, orderRef } = req.body;
   await fireWebhook({
     eventType: "refund.succeeded",
     providerPaymentId,
     providerRefundId,
+    orderRef: orderRef || undefined, // forward the order so the refund maps to every item
     userId,
     productId,
     amount: Number(amount),
@@ -238,6 +241,26 @@ app.post("/refund/:providerPaymentId", async (req, res) => {
   res.json({ providerRefundId });
 });
 
+// Simulate a chargeback: the customer's bank takes the money back after a successful payment.
+app.post("/chargeback/:providerPaymentId", async (req, res) => {
+  const { providerPaymentId } = req.params;
+  const original = webhookLog.find(
+    (w) => w.payload?.eventType === "payment.succeeded" && w.payload?.providerPaymentId === providerPaymentId,
+  )?.payload;
+  if (!original) return res.status(404).send("Unknown or unsuccessful payment");
+  await fireWebhook({
+    eventType: "chargeback.created",
+    providerPaymentId,
+    providerChargebackId: `mock_cb_${providerPaymentId}`, // one chargeback per payment
+    userId: original.userId,
+    productId: original.productId,
+    amount: original.amount,
+    currency: original.currency,
+    occurredAt: new Date().toISOString(),
+  });
+  res.redirect("/admin");
+});
+
 // Admin view: recent webhook deliveries.
 app.get("/admin", (_req, res) => {
   const rows = webhookLog
@@ -245,7 +268,11 @@ app.get("/admin", (_req, res) => {
     .reverse()
     .map(
       (w) =>
-        `<tr><td>${w.at}</td><td>${esc(w.payload?.eventType)}</td><td>${w.status}</td><td><code>${esc(w.response)}</code></td></tr>`,
+        `<tr><td>${w.at}</td><td>${esc(w.payload?.eventType)}</td><td>${w.status}</td><td><code>${esc(w.response)}</code></td><td>${
+          w.payload?.eventType === "payment.succeeded"
+            ? `<form method="POST" action="/chargeback/${esc(w.payload.providerPaymentId)}" style="margin:0"><button class="fail" style="padding:.3rem .6rem;font-size:.75rem">Chargeback</button></form>`
+            : ""
+        }</td></tr>`,
     )
     .join("");
   res.send(
@@ -253,7 +280,7 @@ app.get("/admin", (_req, res) => {
       "Mock Provider Admin",
       `<h2>Recent webhook deliveries</h2>
     <table style="width:100%;border-collapse:collapse;font-size:.8rem">
-    <tr><th>Time</th><th>Event</th><th>Status</th><th>Response</th></tr>${rows || "<tr><td colspan=4>None</td></tr>"}</table>`,
+    <tr><th>Time</th><th>Event</th><th>Status</th><th>Response</th><th></th></tr>${rows || "<tr><td colspan=5>None</td></tr>"}</table>`,
     ),
   );
 });

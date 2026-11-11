@@ -41,6 +41,10 @@ router.post("/api/dev/events", requireAuth, (req, res) => {
         currency: b.currency || product?.currency || "INR",
         occurredAt: new Date().toISOString(),
         referenceeventId: b.referenceeventId ?? null,
+        source: b.source,
+        actor: b.actor ?? `dev:${req.user.id}`,
+        reason: b.reason,
+        entitlement: b.entitlement,
       },
       { method: "DEV_SIMULATOR" },
     );

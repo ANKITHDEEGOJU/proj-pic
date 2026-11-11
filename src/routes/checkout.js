@@ -5,8 +5,8 @@ const { randomUUID } = require("crypto");
 const pool = require("../db");
 const { requireAuth } = require("../auth");
 const { PaymentService } = require("../payment/service");
-const { courseCard } = require("../views");
-const { validateCoupon } = require("../services/pricingEngine");
+const { courseCard, subscriptionCard } = require("../views");
+const { validateCoupon, resolveSubscriptionPrice } = require("../services/pricingEngine");
 
 // Helper to look up catalog item by id or slug safely
 function resolveCatalogProduct(catalog, key) {
@@ -86,8 +86,8 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
     const itemType = p.type || 'COURSE';
     await client.query(
       `INSERT INTO order_line_items (
-        order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         orderId,
         itemType,
@@ -95,7 +95,8 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
         finalPayableCents,
         1,
         p.durationDays || null,
-        p.scope || null
+        p.scope || null,
+        finalPayableCents // single item: it carries the whole (discounted) payment
       ]
     );
 
@@ -161,8 +162,26 @@ router.post(
         );
       }
 
+      // Which purchase a refund undoes: for a subscription, the most recent PAID period
+      // (a free admin month stacked on top must not block refunding the paid one).
+      const refundEventId = ent.type === "SUBSCRIPTION" ? ent.refundableEventId : ent.sourceEventId;
+      const isFreeOnly = ent.type === "SUBSCRIPTION"
+        ? !refundEventId
+        : ent.grantedVia === "MANUAL_GRANT" || ent.grantedVia === "SEAT_ASSIGNED";
+
+      // M1: free access (admin/scholarship grant, org seat) was never paid for, so there is nothing to refund.
+      if (isFreeOnly) {
+        if (isSub) {
+          const subPriceInfo = await resolveSubscriptionPrice(req.user, productId, catalog);
+          return res.send(subscriptionCard(false, subPriceInfo, true, ent));
+        }
+        return res.send(
+          courseCard(p, decisions.evaluateAccess(req.user.id, productId), "This access was granted for free and can't be refunded.")
+        );
+      }
+
       // 2. Locate original purchase record in ledger
-      const purchaseRecord = await ledger.getByEventId(ent.sourceEventId);
+      const purchaseRecord = await ledger.getByEventId(refundEventId);
       const paymentInfo = purchaseRecord?.paymentInfo || {};
       const provider = paymentInfo.provider || "mock";
       const providerPaymentId = paymentInfo.providerPaymentId;
@@ -171,116 +190,154 @@ router.post(
       let itemsToRefund = [{ 
         item_id: productId, 
         item_type: isSub ? "SUBSCRIPTION" : "COURSE",
-        sourceEventId: ent.sourceEventId 
+        sourceEventId: refundEventId 
       }];
 
-      // 3. Fetch all line items if part of a multi-cart order
-      if (orderId) {
-        const lineRes = await pool.query(
-          "SELECT item_id, item_type, unit_price_cents, quantity, scope FROM order_line_items WHERE order_id = $1",
-          [orderId]
+      // 3. Whole-order refund: every paid event recorded for this same provider payment
+      //    (one per cart item), read from the ledger itself rather than rebuilt from id strings.
+      if (providerPaymentId) {
+        const { rows } = await pool.query(
+          `SELECT event_id, product_id, quantity FROM commerce_ledger
+            WHERE user_id = $1 AND payment_info->>'providerPaymentId' = $2
+              AND event_type IN ('PURCHASE_SUCCEEDED','SUBSCRIPTION_STARTED','SUBSCRIPTION_RENEWED')
+            ORDER BY ledger_sequence_id`,
+          [req.user.id, providerPaymentId]
         );
-
-        if (lineRes.rows.length > 0) {
-          const baseEventId = ent.sourceEventId.includes(":") 
-            ? ent.sourceEventId.substring(0, ent.sourceEventId.lastIndexOf(":")) 
-            : ent.sourceEventId;
-
-          itemsToRefund = lineRes.rows.map((r) => ({
-            item_id: r.item_id,
-            item_type: r.item_type || (r.item_id.startsWith("sub") ? "SUBSCRIPTION" : "COURSE"),
-            sourceEventId: `${baseEventId}:${r.item_id}`,
-            unitPriceCents: r.unit_price_cents,
-            quantity: r.quantity,
-            scope: r.scope
-          }));
+        if (rows.length > 0) {
+          itemsToRefund = rows.map((r) => ({ item_id: r.product_id, sourceEventId: r.event_id, quantity: r.quantity }));
         }
       }
 
-      // 4. Initiate Gateway Refund
+      // A refund is always for the whole order: every item bought in that payment is
+      // revoked, so the customer gets back everything they actually paid (after coupons),
+      // not just the catalog price of the item they clicked.
+      for (const item of itemsToRefund) {
+        const orig = await ledger.getByEventId(item.sourceEventId);
+        item.paidAmount = orig ? orig.event.amount : null;
+      }
+      let refundAmount = null;
+      if (orderId) {
+        const o = await pool.query("SELECT final_payable_cents FROM orders WHERE id = $1", [orderId]);
+        if (o.rows[0]) refundAmount = o.rows[0].final_payable_cents / 100;
+      }
+      if (refundAmount === null) {
+        refundAmount = itemsToRefund.reduce((sum, i) => sum + (i.paidAmount ?? 0), 0);
+      }
+
+      const renderAfter = async (msg, pending = false) => {
+        if (isSub || itemsToRefund.length > 1) {
+          // Whole page reload so every card / the banner shows the new state.
+          return res.set("HX-Refresh", "true").send();
+        }
+        return res.send(courseCard(p, decisions.evaluateAccess(req.user.id, productId), msg, pending));
+      };
+
+      // Records one REFUND per item of the order and closes the order.
+      // `idFor` gives each item's ledger event id; for provider refunds it is the same id the
+      // provider's refund webhook produces, so a later webhook is just a duplicate.
+      const recordRefund = async (idFor, extraInfo) => {
+        const problems = [];
+        for (const item of itemsToRefund) {
+          const itemProduct = resolveCatalogProduct(catalog, item.item_id);
+          const itemPrice = item.paidAmount ?? (itemProduct ? itemProduct.price : ((item.unitPriceCents || 0) / 100));
+          try {
+            await ledger.appendEvent(
+              {
+                eventId: idFor(item),
+                eventType: 'REFUND',
+                userId: req.user.id,
+                productId: item.item_id,
+                quantity: item.quantity || 1,
+                amount: itemPrice,
+                currency: itemProduct?.currency || 'USD',
+                occurredAt: new Date().toISOString(),
+                referenceeventId: item.sourceEventId,
+                source: 'PAYMENT',
+                actor: `user:${req.user.id}`,
+              },
+              { ...paymentInfo, ...extraInfo }
+            );
+          } catch (ledgerErr) {
+            // E1_ALREADY_REVERSED here just means the provider's webhook got there first.
+            if (ledgerErr.code !== 'E1_ALREADY_REVERSED') {
+              console.error(`[refund] could not record refund for ${item.item_id}:`, ledgerErr.message);
+              problems.push(`${item.item_id}: ${ledgerErr.message}`);
+            }
+          }
+        }
+        if (orderId) {
+          // Money already went back; if access could not be updated, flag it for an admin.
+          await pool.query("UPDATE orders SET status = $2, updated_at = now() WHERE id = $1",
+            [orderId, problems.length ? 'REFUND_FAILED' : 'REFUNDED']);
+        }
+        return problems;
+      };
+      const finish = (problems) => problems.length
+        ? renderAfter('Refund sent, but access could not be updated. An admin has been notified.')
+        : renderAfter('Refund processed. Access revoked.');
+
+      // 4. Provider refund. This route only ASKS the provider for the refund. The order stays
+      //    REFUND_PENDING (access kept, card shows "Refund pending") until the provider's refund
+      //    webhook arrives (Razorpay refund.created/processed, mock refund.succeeded); the
+      //    webhook processor then writes the REFUND events and marks the order REFUNDED.
+      //    A refund.failed webhook reopens the order (REFUND_PENDING -> COMPLETED).
       if (provider && providerPaymentId) {
+        if (orderId) {
+          // Claim the order first: stops double-clicks from issuing two refunds.
+          const claim = await pool.query(
+            // (older orders may still say PENDING even though they were paid)
+            "UPDATE orders SET status='REFUND_PENDING', updated_at=now() WHERE id=$1 AND status IN ('COMPLETED','PENDING') RETURNING id",
+            [orderId]
+          );
+          if (claim.rowCount === 0) {
+            const cur = await pool.query("SELECT status FROM orders WHERE id=$1", [orderId]);
+            const st = cur.rows[0]?.status;
+            if (st === 'REFUND_PENDING') return renderAfter('Refund already in progress.', true);
+            if (st) return renderAfter(`Order is ${st.toLowerCase().replace('_', ' ')}, nothing to refund.`);
+          }
+        }
+
         const svc = new PaymentService({ catalog });
+        let providerRefundId;
         try {
-          await svc.initiateRefund({ 
+          ({ providerRefundId } = await svc.initiateRefund({ 
             userId: req.user.id, 
             productId, 
             orderId,
+            amount: refundAmount,
             providerPaymentId, 
             provider 
-          });
+          }));
         } catch (e) {
+          // Provider said no: nothing changed, reopen the order.
+          if (orderId) {
+            await pool.query(
+              "UPDATE orders SET status='COMPLETED', updated_at=now() WHERE id=$1 AND status='REFUND_PENDING'",
+              [orderId]
+            );
+          }
+          // Razorpay SDK errors carry the text in e.error.description, not e.message.
+          e.message = e.message || e.error?.description || (e.statusCode ? `provider returned HTTP ${e.statusCode}` : 'payment provider refused the refund');
           console.error('[refund] Provider error:', e.message);
           if (isSub) {
             const subPriceInfo = await resolveSubscriptionPrice(req.user, productId, catalog);
-            return res.send(subscriptionCard(false, subPriceInfo, true, ent));
+            return res.send(subscriptionCard(false, subPriceInfo, true, ent, { message: `Refund failed: ${e.message}` }));
           }
           return res.send(
             courseCard(p, decisions.evaluateAccess(req.user.id, productId), `Refund failed: ${e.message}`)
           );
         }
+
+        // Provider accepted the request. Nothing is written to the ledger here: the order stays
+        // REFUND_PENDING until the provider's refund webhook confirms it. (The mock provider
+        // sends that webhook before this call returns, so the order may already be REFUNDED.)
+        console.log(`[refund] ${provider} refund ${providerRefundId} requested for order ${orderId || '-'}; waiting for webhook`);
+        return renderAfter('Refund requested. Access will be removed once the payment provider confirms it.', true);
       }
 
-      // 5. Append individual REFUND events for ALL line items
-      for (const item of itemsToRefund) {
-        const itemProduct = resolveCatalogProduct(catalog, item.item_id);
-        const itemPrice = itemProduct ? itemProduct.price : ((item.unitPriceCents || 0) / 100);
-        const itemType = item.item_type || itemProduct?.type || (item.item_id.startsWith("sub") ? "SUBSCRIPTION" : "COURSE");
-        const scope = item.scope || itemProduct?.scope || (itemType === "SUBSCRIPTION" ? "ALL_ACCESS" : null);
-
-        try {
-          await ledger.appendEvent(
-            {
-              eventId: `ref_${randomUUID()}:${item.item_id}`,
-              eventType: 'REFUND',
-              userId: req.user.id,
-              productId: item.item_id,
-              quantity: item.quantity || 1,
-              amount: itemPrice,
-              currency: itemProduct?.currency || 'USD',
-              occurredAt: new Date().toISOString(),
-              referenceeventId: item.sourceEventId,
-            }, 
-            { 
-              ...paymentInfo, 
-              itemType, 
-              scope, 
-              method: provider ? 'GATEWAY_REFUND' : 'DIRECT_REFUND' 
-            },
-            {
-              type: itemType,
-              scope,
-              id: item.item_id
-            }
-          );
-        } catch (ledgerErr) {
-          console.warn(`[refund] Ledger note for ${item.item_id}:`, ledgerErr.message);
-        }
-      }
-
-      // 6. Update Postgres order header
-      if (orderId) {
-        await pool.query(
-          "UPDATE orders SET status = 'REFUNDED', updated_at = now() WHERE id = $1",
-          [orderId]
-        );
-      }
-
-      // 7. For Subscription or Multi-item refunds: trigger full page reload so all course cards lock back
-      if (isSub || itemsToRefund.length > 1) {
-        return res.set("HX-Refresh", "true").send();
-      }
-
-      if (provider === 'razorpay') {
-        return res.send(courseCard(p, decisions.evaluateAccess(req.user.id, productId), '', true));
-      }
-
-      res.send(
-        courseCard(
-          p, 
-          decisions.evaluateAccess(req.user.id, productId), 
-          'Refund processed. Access revoked.'
-        )
-      );
+      // 5. No payment provider behind this purchase (e.g. dev-simulated events):
+      //    nobody else will confirm it, so record the REFUND directly.
+      return finish(await recordRefund((item) => `ref_${randomUUID()}:${item.item_id}`, { method: 'DIRECT_REFUND' }));
     } catch (e) {
       next(e);
     }
@@ -292,8 +349,8 @@ router.get('/razorpay/checkout', requireAuth, (req, res) => {
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   </head><body><script>
     const options = {
-      key: "${process.env.RAZORPAY_KEY_ID || ''}",
-      order_id: "${orderId}",
+      key: ${JSON.stringify(process.env.RAZORPAY_KEY_ID || '').replace(/</g, '\\u003c')},
+      order_id: ${JSON.stringify(String(orderId || '')).replace(/</g, '\\u003c')},
       handler: function(response) {
         window.location.href = '/courses';
       }

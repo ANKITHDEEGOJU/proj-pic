@@ -127,6 +127,11 @@ const userRowsHtml = users.map(u => {
                 <option value="" disabled selected>Select course/sub...</option>
                 ${productOptions}
               </select>
+              <select name="source" style="padding: 0.38rem; border-radius: 4px; border: 1px solid #ccc; font-size: 0.85rem;">
+                <option value="ADMIN">Admin</option>
+                <option value="SCHOLARSHIP">Scholarship</option>
+              </select>
+              <input name="reason" placeholder="Reason (optional)" style="padding: 0.38rem; border-radius: 4px; border: 1px solid #ccc; font-size: 0.85rem; width: 9rem;">
               <button type="submit" style="padding: 0.38rem 0.8rem; font-size: 0.85rem;">Grant Access</button>
             </form>
           </td>
@@ -142,7 +147,7 @@ const userRowsHtml = users.map(u => {
 
       <div class="card" style="margin-bottom: 1.5rem;">
         <p style="color: #5B5F6E; margin: 0;">
-          Granting or revoking access appends <code>PURCHASE_SUCCEEDED</code> or <code>REFUND</code> events to the <code>commerce_ledger</code>.
+          Granting or revoking access appends <code>MANUAL_GRANT</code> or <code>MANUAL_REVOKE</code> events to the <code>commerce_ledger</code>.
           The entitlement projection engine updates automatically in real-time.
         </p>
       </div>
@@ -189,35 +194,29 @@ router.post('/admin/users/grant', requireAdmin, async (req, res) => {
     const durationDays = product.durationDays || (itemType === 'SUBSCRIPTION' ? 30 : null);
     const scope = product.scope || (itemType === 'SUBSCRIPTION' ? 'ALL_ACCESS' : null);
 
-    const productSnapshot = {
-      id: targetProductId,
-      slug: targetProductId,
-      title: product.name || product.title || targetProductId,
-      type: itemType,
-      durationDays,
-      scope
-    };
-
-    // Append PURCHASE_SUCCEEDED event to Commerce Ledger
+    // M1: a free grant is its own event type, not a $0 purchase.
+    const source = req.body.source === 'SCHOLARSHIP' ? 'SCHOLARSHIP' : 'ADMIN';
     await ledger.appendEvent(
       {
         eventId: `admin_grant_${randomUUID()}`,
-        eventType: 'PURCHASE_SUCCEEDED',
+        eventType: 'MANUAL_GRANT',
         userId: String(userId),
         productId: targetProductId,
         quantity: 1,
         amount: 0,
         currency: product.currency || 'USD',
-        occurredAt: new Date().toISOString()
+        occurredAt: new Date().toISOString(),
+        source,
+        actor: req.user.email,
+        reason: (req.body.reason || '').trim() || null,
+        entitlement: {
+          kind: itemType === 'SUBSCRIPTION' ? 'SUBSCRIPTION' : 'COURSE',
+          scope,
+          durationDays,
+          expiresAt: null,
+        },
       },
-      {
-        method: 'ADMIN_MANUAL_GRANT',
-        grantedBy: req.user.email,
-        itemType,
-        durationDays,
-        scope
-      },
-      productSnapshot
+      { method: 'ADMIN_MANUAL_GRANT', grantedBy: req.user.email }
     );
 
     res.redirect('/admin/users');
@@ -250,24 +249,30 @@ router.post('/admin/users/revoke', requireAdmin, async (req, res) => {
       return res.redirect('/admin/users');
     }
 
-    // Append REFUND event to Commerce Ledger referencing original event
-    await ledger.appendEvent(
-      {
-        eventId: `admin_ref_${randomUUID()}`,
-        eventType: 'REFUND',
-        userId: String(userId),
-        productId: targetProductId,
-        quantity: 1,
-        amount: 0,
-        currency: product?.currency || 'USD',
-        occurredAt: new Date().toISOString(),
-        referenceeventId: ent.sourceEventId
-      },
-      {
-        method: 'ADMIN_MANUAL_REVOKE',
-        revokedBy: req.user.email
-      }
-    );
+    // M1: an admin taking access away is MANUAL_REVOKE (no money moves), not a refund.
+    // A subscription is a list of periods; revoke every one so all access ends.
+    const targets = ent.type === 'SUBSCRIPTION' && ent.periods?.length
+      ? ent.periods.map((per) => ({ eventId: per.eventId, productId: per.productId }))
+      : [{ eventId: ent.sourceEventId, productId: targetProductId }];
+    for (const tgt of targets) {
+      await ledger.appendEvent(
+        {
+          eventId: `admin_revoke_${randomUUID()}`,
+          eventType: 'MANUAL_REVOKE',
+          userId: String(userId),
+          productId: tgt.productId,
+          quantity: 1,
+          amount: 0,
+          currency: product?.currency || 'USD',
+          occurredAt: new Date().toISOString(),
+          referenceeventId: tgt.eventId,
+          source: 'ADMIN',
+          actor: req.user.email,
+          reason: (req.body.reason || '').trim() || null,
+        },
+        { method: 'ADMIN_MANUAL_REVOKE', revokedBy: req.user.email }
+      );
+    }
 
     res.redirect('/admin/users');
   } catch (err) {

@@ -1,5 +1,7 @@
 "use strict";
-const { DomainError, deepFreeze, sameEvent } = require("../util");
+const { DomainError, deepFreeze, sameEvent, EVENT_EFFECT } = require("../util");
+
+const REVOKE_TYPES = Object.keys(EVENT_EFFECT).filter((t) => EVENT_EFFECT[t] === "REVOKE");
 
 const toRecord = (r) =>
   deepFreeze({
@@ -14,6 +16,10 @@ const toRecord = (r) =>
       currency: r.currency,
       occurredAt: r.occurred_at.toISOString(),
       referenceeventId: r.reference_event_id,
+      source: r.source,
+      actor: r.actor,
+      reason: r.reason,
+      entitlement: r.entitlement,
     },
     productSnapshot: r.product_snapshot,
     paymentInfo: r.payment_info,
@@ -29,8 +35,8 @@ class PgLedgerStore {
   async append({ event: e, productSnapshot, paymentInfo }) {
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO commerce_ledger (event_id,event_type,user_id,product_id,quantity,amount,currency,occurred_at,reference_event_id,product_snapshot,payment_info)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        `INSERT INTO commerce_ledger (event_id,event_type,user_id,product_id,quantity,amount,currency,occurred_at,reference_event_id,product_snapshot,payment_info,source,actor,reason,entitlement)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (event_id) DO NOTHING RETURNING *`, // L3: race-safe idempotency
         [
           e.eventId,
@@ -44,6 +50,10 @@ class PgLedgerStore {
           e.referenceeventId,
           productSnapshot,
           paymentInfo,
+          e.source,
+          e.actor,
+          e.reason,
+          e.entitlement,
         ],
       );
       if (rows[0]) return { inserted: true, record: toRecord(rows[0]) };
@@ -52,11 +62,11 @@ class PgLedgerStore {
     } catch (err) {
       if (
         err.code === "23505" &&
-        err.constraint === "uq_one_refund_per_purchase"
+        err.constraint === "uq_one_reversal_per_event"
       )
         throw new DomainError(
-          "E1_REFUND_ALREADY_APPLIED",
-          "Purchase already refunded",
+          "E1_ALREADY_REVERSED",
+          `Event ${e.referenceeventId} already reversed`,
         );
       if (err.code === "23503")
         throw new DomainError(
@@ -80,12 +90,13 @@ class PgLedgerStore {
     );
     return rows[0] ? toRecord(rows[0]) : null;
   }
-  async hasRefundFor(id) {
-    const { rowCount } = await this.pool.query(
-      `SELECT 1 FROM commerce_ledger WHERE event_type='REFUND' AND reference_event_id=$1`,
-      [id],
+  // Returns the type of the event that already reversed `id`, or null.
+  async findReversalOf(id) {
+    const { rows } = await this.pool.query(
+      `SELECT event_type FROM commerce_ledger WHERE event_type = ANY($2) AND reference_event_id=$1 LIMIT 1`,
+      [id, REVOKE_TYPES],
     );
-    return rowCount > 0;
+    return rows[0]?.event_type ?? null;
   }
   async count() {
     return Number(
