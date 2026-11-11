@@ -3,6 +3,7 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
+const { isRenewal } = require("../services/subscriptions");
 const { subscriptionCard, courseCard, layout, esc, navCart } = require('../views');
 const { resolveSubscriptionPrice, validateCoupon, allocatePaidCents } = require('../services/pricingEngine');
 const { PaymentService } = require('../payment/service');
@@ -373,8 +374,8 @@ router.post('/cart/checkout', async (req, res) => {
     for (const [idx, item] of cartItems.entries()) {
       await client.query(
         `INSERT INTO order_line_items (
-          order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
           orderId,
           item.item_type,
@@ -384,6 +385,8 @@ router.post('/cart/checkout', async (req, res) => {
           item.duration_days,
           item.scope,
           paidCents[idx],
+          // M4: buying a pass while one is active extends it (SUBSCRIPTION_RENEWED).
+          item.item_type === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, userId, item.scope),
         ]
       );
     }

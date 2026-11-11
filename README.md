@@ -10,6 +10,7 @@ A course storefront built with Node.js, Express and PostgreSQL. Users can browse
 - Payments via Razorpay test mode or a local mock provider
 - Webhook handling with an inbox table for tracking deliveries, plus purchase and refund events
 - Admin panel: manage pricing rules and grant or revoke course access for users
+- Organizations with seat packs, and subscription renew / cancel
 
 ## Requirements
 
@@ -44,6 +45,29 @@ cd mock-provider && npm start      # optional mock payment provider on :3001
 
 Then open http://localhost:3000/login, register an account, and visit `/courses`. Admin pages are at `/admin`.
 
+## Commercial rules
+
+**Cart and coupons**
+- A cart holds either individual courses or one All-Access pass, never both: adding a pass empties the cart, and adding a course removes a pass.
+- One coupon per order. The discount is split across the order's lines, so per-item ledger amounts add up to what was charged. An applied coupon is remembered across page loads and re-checked at checkout.
+- Coupons don't apply to seat packs.
+
+**Courses vs the All-Access pass**
+- A course can be held several ways at once (bought, admin grant, org seat, pass). Losing one of them (refund, revoke, seat unassigned, pass expired) keeps any other.
+- A pass gives every course while it is active. Courses bought separately stay after the pass ends.
+
+**Subscriptions (manual renewal)**
+- *Renew* pays for another 30 days through the normal checkout. Bought while a pass is active, it is recorded as `SUBSCRIPTION_RENEWED` and starts when the current period ends.
+- *Cancel renewal* records `SUBSCRIPTION_CANCELLED`. Access continues until the paid-up end date and the renewal reminder (last 7 days) stops. Paying again turns renewal back on.
+- A refund removes only the period it refunds.
+
+**Enterprise seats**
+- The buyer of a seat pack owns the organization (one per user) and manages it at `/org`. Platform admins see all organizations at `/admin/orgs`.
+- A seat pack is N seats of one course, priced N × course price. Buying it gives the buyer no access by itself.
+- Seats are assigned by the member's email (they need a LearnX account). One seat per member per pack, never more than N in use. Usage is counted from the ledger.
+- Unassign takes the seat back; reassign moves it to another member in one step.
+- Refunding or charging back a pack unassigns every seat. Refunds wait for the provider's webhook, like course refunds.
+
 ## Webhook retries and reconciliation
 
 - **Retries (M2):** every webhook is stored in `webhook_inbox` before processing. Failed rows are retried in the background with exponential backoff (30 s, 60 s, … capped at 1 h) and become `DEAD` after 8 attempts. A refund that arrives before its purchase gets HTTP 503 so the provider re-sends it.
@@ -67,5 +91,5 @@ src/views.js         HTML templates
 ## Verification
 
 ```bash
-npm run verify       # ledger checks + webhook retry / reconciliation checks against Postgres
+npm run verify       # ledger, webhook retry / reconciliation and M4 (seats, subscriptions) checks against Postgres
 ```

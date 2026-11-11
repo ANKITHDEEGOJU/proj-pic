@@ -9,7 +9,7 @@ const {
 } = require("./util");
 
 const EVENT_TYPES = Object.keys(EVENT_EFFECT);
-const PAID_TYPES = ["PURCHASE_SUCCEEDED", "SUBSCRIPTION_STARTED", "SUBSCRIPTION_RENEWED"];
+const PAID_TYPES = ["PURCHASE_SUCCEEDED", "SUBSCRIPTION_STARTED", "SUBSCRIPTION_RENEWED", "SEAT_POOL_PURCHASED"];
 const GRANTING_TYPES = EVENT_TYPES.filter((t) => ["GRANT", "EXTEND"].includes(EVENT_EFFECT[t]));
 
 // Which earlier event types each referencing event may point at.

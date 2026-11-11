@@ -8,6 +8,9 @@ class EntitlementProjectionEngine {
   #state = new Map();
   #kindByEvent = new Map(); // granting eventId -> { kind, scope }, so reversals hit the right entitlement
   #subs = new Map(); // subKey -> { periods, cancelledAt, lastRevoke } (raw subscription state)
+  // key -> Map(granting eventId -> active grant view). A course can be held several ways at
+  // once (bought, admin grant, org seat); revoking one only removes that one (M4).
+  #courseGrants = new Map();
 
   constructor(ledger) {
     this.ledger = ledger;
@@ -27,8 +30,14 @@ class EntitlementProjectionEngine {
     if (!e || !e.userId || !e.productId) return;
     const effect = EVENT_EFFECT[e.eventType];
     if (!effect || effect === "NONE") return;
+    // A seat pack purchase gives the buyer no access; remember it so its refund is ignored too.
+    if (effect === "POOL") {
+      this.#kindByEvent.set(e.eventId, { kind: "SEAT_POOL", scope: null });
+      return;
+    }
 
     const target = this.#resolveTarget(record, effect);
+    if (target.kind === "SEAT_POOL") return; // refund / chargeback of a seat pack: seats are unassigned separately
     if (effect === "GRANT" || effect === "EXTEND") this.#kindByEvent.set(e.eventId, target);
 
     if (target.kind === "SUBSCRIPTION") this.#applySubscription(record, effect, target);
@@ -83,26 +92,41 @@ class EntitlementProjectionEngine {
       const days = this.#durationDays(record);
       if (!expiresAt && days) expiresAt = new Date(Date.parse(e.occurredAt) + days * DAY_MS).toISOString();
 
-      this.#state.set(
-        k,
-        deepFreeze({
-          userId: e.userId,
-          productId: e.productId,
-          type: "COURSE",
-          status: "ACTIVE",
-          sourceEventId: e.eventId,
-          grantedVia: e.eventType,
-          source: e.source ?? "PAYMENT",
-          grantedAt: e.occurredAt,
-          expiresAt,
-          cancelledAt: null,
-          revokedAt: null,
-        }),
-      );
+      const grant = deepFreeze({
+        userId: e.userId,
+        productId: e.productId,
+        type: "COURSE",
+        status: "ACTIVE",
+        sourceEventId: e.eventId,
+        grantedVia: e.eventType,
+        source: e.source ?? "PAYMENT",
+        grantedAt: e.occurredAt,
+        expiresAt,
+        cancelledAt: null,
+        revokedAt: null,
+      });
+      const grants = this.#courseGrants.get(k) ?? new Map();
+      grants.set(e.eventId, grant);
+      this.#courseGrants.set(k, grants);
+      this.#state.set(k, this.#currentCourseGrant(grants));
     } else if (effect === "REVOKE") {
+      const grants = this.#courseGrants.get(k);
+      if (grants?.delete(e.referenceeventId) && grants.size > 0) {
+        // Another grant still gives access (e.g. a seat was unassigned but the course was bought).
+        this.#state.set(k, this.#currentCourseGrant(grants));
+        return;
+      }
+      if (grants) grants.clear();
       this.#state.set(k, this.#revoked(this.#state.get(k), e, "COURSE"));
     }
     // STOP_RENEW has no meaning for a one-time course purchase.
+  }
+
+  // Which of several active grants the course card shows: a paid purchase first (it is the
+  // one that can be refunded and never goes away on its own), otherwise the most recent.
+  #currentCourseGrant(grants) {
+    const all = [...grants.values()];
+    return [...all].reverse().find((g) => g.grantedVia === "PURCHASE_SUCCEEDED") ?? all[all.length - 1];
   }
 
   // Subscriptions are a list of paid/granted periods laid end to end.
@@ -207,6 +231,7 @@ class EntitlementProjectionEngine {
     this.#state.clear();
     this.#kindByEvent.clear();
     this.#subs.clear();
+    this.#courseGrants.clear();
   }
 
   async rebuildFromLedger() {

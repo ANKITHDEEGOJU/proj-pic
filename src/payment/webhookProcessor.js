@@ -2,6 +2,7 @@
 
 const pool = require('../db');
 const { EVENT_EFFECT, DomainError } = require('../domain/util');
+const seats = require('../services/seats');
 
 // M2 retry policy (env-overridable). A failed row is retried after BASE, 2*BASE, 4*BASE ...
 // seconds (capped at MAX_DELAY) and becomes DEAD after MAX_ATTEMPTS processing attempts.
@@ -62,9 +63,11 @@ class WebhookProcessor {
     return Number(cents) / 100;
   }
 
-  // A paid subscription is recorded as SUBSCRIPTION_STARTED, not a generic purchase.
-  #grantType(entitlement) {
-    return entitlement.kind === 'SUBSCRIPTION' ? 'SUBSCRIPTION_STARTED' : 'PURCHASE_SUCCEEDED';
+  // A paid subscription is SUBSCRIPTION_STARTED, or SUBSCRIPTION_RENEWED when checkout saw an
+  // active pass already (order_line_items.renewal, fixed at checkout so replays agree).
+  #grantType(entitlement, itemRow = null) {
+    if (entitlement.kind !== 'SUBSCRIPTION') return 'PURCHASE_SUCCEEDED';
+    return itemRow?.renewal ? 'SUBSCRIPTION_RENEWED' : 'SUBSCRIPTION_STARTED';
   }
 
   // Appends an event. A provider confirming a reversal we already recorded ourselves
@@ -166,7 +169,7 @@ class WebhookProcessor {
         const isFailed = commerceEvent.eventType === 'PURCHASE_FAILED';
         if (orderId && (commerceEvent.eventType === 'PURCHASE_SUCCEEDED' || isFailed)) {
           const itemsRes = await pool.query(
-            `SELECT item_id, item_type, unit_price_cents, quantity, duration_days, scope, paid_cents
+            `SELECT item_id, item_type, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
              FROM order_line_items 
              WHERE order_id = $1`,
             [orderId]
@@ -176,11 +179,13 @@ class WebhookProcessor {
             processedLineItems = true;
 
             for (const itemRow of itemsRes.rows) {
+              // M4: a seat pack records the payment for the org; it grants nobody access itself.
+              const isSeatPack = itemRow.item_type === 'SEAT_PACK';
               const entitlement = this.#entitlementFor(itemRow.item_id, itemRow);
               const lineItemEvent = {
                 ...commerceEvent,
-                eventType: isFailed ? 'PURCHASE_FAILED' : this.#grantType(entitlement),
-                ...(isFailed ? {} : { entitlement }),
+                eventType: isFailed ? 'PURCHASE_FAILED' : isSeatPack ? 'SEAT_POOL_PURCHASED' : this.#grantType(entitlement, itemRow),
+                ...(isFailed || isSeatPack ? {} : { entitlement }),
                 eventId: `${commerceEvent.eventId}:${itemRow.item_id}`, // Unique, deterministic per item
                 productId: itemRow.item_id,
                 quantity: Number(itemRow.quantity || 1),
@@ -194,10 +199,14 @@ class WebhookProcessor {
                 durationDays: itemRow.duration_days,
                 scope: itemRow.scope,
               };
+              if (isSeatPack) linePaymentInfo.poolId = await seats.poolIdForOrder(orderId, itemRow.item_id);
 
               const result = await this.ledger.appendEvent(lineItemEvent, linePaymentInfo);
               if (result.appended) appendedAny = true;
               lastLedgerEventId = result.appended ? result.record.event.eventId : lineItemEvent.eventId;
+              if (isSeatPack && !isFailed && (result.appended || result.reason === 'DUPLICATE_EVENT')) {
+                await seats.activatePool(orderId, itemRow.item_id, lineItemEvent.eventId);
+              }
             }
 
             // Mark order header as COMPLETED (a failed attempt leaves it PENDING: the
@@ -279,6 +288,12 @@ class WebhookProcessor {
             "UPDATE orders SET status=$2, updated_at=now() WHERE id=$1",
             [orderId, commerceEvent.eventType === 'CHARGEBACK' ? 'CHARGED_BACK' : 'REFUNDED']
           );
+          // M4: money for a seat pack went back, so every seat in it is unassigned.
+          await seats.revokePoolsForOrder({
+            ledger: this.ledger,
+            orderId,
+            reason: commerceEvent.eventType === 'CHARGEBACK' ? 'Seat pack charged back' : 'Seat pack refunded',
+          });
         }
       } catch (e) {
         const st = await this.markFailed(id, e.message);

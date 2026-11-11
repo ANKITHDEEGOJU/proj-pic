@@ -158,11 +158,11 @@ ALTER TABLE commerce_ledger ADD  CONSTRAINT commerce_ledger_event_type_check CHE
   'PURCHASE_SUCCEEDED','PURCHASE_FAILED','REFUND','CHARGEBACK',
   'MANUAL_GRANT','MANUAL_REVOKE',
   'SUBSCRIPTION_STARTED','SUBSCRIPTION_RENEWED','SUBSCRIPTION_CANCELLED',
-  'SEAT_ASSIGNED','SEAT_UNASSIGNED'));
+  'SEAT_ASSIGNED','SEAT_UNASSIGNED','SEAT_POOL_PURCHASED'));
 
 ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_source_check;
 ALTER TABLE commerce_ledger ADD  CONSTRAINT commerce_ledger_source_check
-  CHECK (source IN ('PAYMENT','ADMIN','SCHOLARSHIP','ORG_SEAT','SYSTEM'));
+  CHECK (source IN ('PAYMENT','ADMIN','SCHOLARSHIP','ORG_SEAT','SYSTEM','CUSTOMER'));
 
 -- Reversals and cancellations must point at an earlier event; nothing else may.
 ALTER TABLE commerce_ledger DROP CONSTRAINT IF EXISTS commerce_ledger_check;           -- old REFUND-only rule
@@ -260,3 +260,37 @@ CREATE TABLE IF NOT EXISTS recon_issues (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_recon_issue_open ON recon_issues (kind, ref) WHERE status = 'OPEN';
 -- A given repair is made (and logged) once.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_recon_issue_fixed ON recon_issues (kind, ref) WHERE status = 'AUTO_FIXED';
+
+-- -----------------------------------------------------------------------------
+-- 9. Enterprise seats and subscription lifecycle (M4)
+-- -----------------------------------------------------------------------------
+-- A subscription line bought while the customer already had an active pass of the same
+-- scope is a renewal (SUBSCRIPTION_RENEWED, stacked after the current end). Decided at
+-- checkout and stored here, so webhook retries / reconciliation replays record the same type.
+ALTER TABLE order_line_items ADD COLUMN IF NOT EXISTS renewal BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS organizations (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  owner_user_id UUID NOT NULL UNIQUE REFERENCES users(id),   -- the buyer manages the org (one org per user)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per seat pack bought: N seats of one course. Which seats are in use is NOT
+-- stored here: it is counted from SEAT_ASSIGNED events (payment_info.poolId) that have
+-- not been reversed by SEAT_UNASSIGNED.
+CREATE TABLE IF NOT EXISTS org_seat_pools (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id            UUID NOT NULL REFERENCES organizations(id),
+  course_id         VARCHAR(100) NOT NULL,
+  seats             INT NOT NULL CHECK (seats > 0),
+  order_id          UUID NOT NULL UNIQUE REFERENCES orders(id),
+  purchase_event_id TEXT REFERENCES commerce_ledger(event_id),  -- SEAT_POOL_PURCHASED, set when paid
+  status            TEXT NOT NULL DEFAULT 'PENDING_PAYMENT'
+                    CHECK (status IN ('PENDING_PAYMENT','ACTIVE','REVOKED')),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_seat_pools_org ON org_seat_pools (org_id);
+CREATE INDEX IF NOT EXISTS ix_ledger_seat_pool ON commerce_ledger ((payment_info->>'poolId'))
+  WHERE event_type IN ('SEAT_ASSIGNED','SEAT_POOL_PURCHASED');

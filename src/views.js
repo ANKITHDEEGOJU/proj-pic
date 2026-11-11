@@ -176,7 +176,7 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <nav>
 <span>
 <strong style="font-family: 'monospace';"><i>LearnX</i></strong>
-${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
+${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
 ${user ? `<span>${esc(user.email)} <button hx-post="/logout">Logout</button></span>` : ''}
 </nav>
 ${body}</body></html>`;
@@ -241,7 +241,9 @@ ${
           ? `<button hx-post="/courses/${s}/checkout/refund" ${t}>Refund</button>`
           : d.reason === 'ACTIVE_SUBSCRIPTION_PASS'
             ? '<small style="color:#2e7d32">Included in your All-Access Pass</small>'
-            : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
+            : d.grantedVia === 'SEAT_ASSIGNED'
+              ? '<small style="color:#2e7d32">Seat from your organization (not refundable)</small>'
+              : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
       } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
     : (inCart
@@ -291,19 +293,36 @@ const subscriptionCard = (
   </form>`;
     const trigger = opts.refundPending ? 'every 2s, cartUpdated from:body' : 'cartUpdated from:body';
 
+    // M4 lifecycle: manual renewal. Renew pays for one more period (stacked after the current
+    // end); Cancel renewal keeps access until the end date and stops the reminder.
+    const { renewalReminder } = require('./services/subscriptions');
+    const daysLeft = renewalReminder(subEnt);
+    const lifecycleNote = subEnt?.cancelledAt
+      ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Renewal cancelled on ${new Date(subEnt.cancelledAt).toLocaleDateString()}. You keep access until <strong>${expStr}</strong>.</p>`
+      : daysLeft
+        ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Your pass ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}. Renew to keep watching.</p>`
+        : '';
+    const lifecycleButtons = opts.refundPending ? '' : `
+  <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;">
+    <button type="button" hx-post="/subscription/renew" hx-vals='{"productId":"${subProductId}"}' style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:4px;font-weight:bold;cursor:pointer;">Renew (+${durationDays} days)</button>
+    ${subEnt?.cancelledAt ? '' : `<button type="button" class="alt" hx-post="/subscription/cancel" ${targetAttr} style="padding:0.5rem 1.2rem;border-radius:4px;cursor:pointer;">Cancel renewal</button>`}
+  </div>`;
+
     return `
 <div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="${trigger}" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
   <div style="display: flex; justify-content: space-between; align-items: flex-start;">
     <div>
       <h3 style="margin-bottom: 0.25rem; color: #1b5e20;">✓ ${planTitle} (Active)</h3>
       <p style="color: #33691e; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
-        You have unlimited streaming access to all courses. Expires: <strong>${expStr}</strong>
+        You have unlimited streaming access to all courses. ${subEnt?.cancelledAt ? 'Access until' : 'Paid up to'}: <strong>${expStr}</strong>
       </p>
+      ${lifecycleNote}
     </div>
-    <span style="background: #2e7d32; color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase;">
-      Active Pass
+    <span style="background: ${subEnt?.cancelledAt ? '#8a4b00' : '#2e7d32'}; color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase;">
+      ${subEnt?.cancelledAt ? 'Not renewing' : 'Active Pass'}
     </span>
   </div>
+  ${lifecycleButtons}
   ${action}
   ${opts.message ? `<div style="font-size:0.85rem;color:#c62828;margin-top:0.4rem;">${esc(opts.message)}</div>` : ''}
 </div>`;

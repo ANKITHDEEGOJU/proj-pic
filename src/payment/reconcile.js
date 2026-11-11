@@ -25,7 +25,8 @@ const pool = require('../db');
 const { registry } = require('./registry');
 const { WebhookProcessor } = require('./webhookProcessor');
 
-const GRANT_TYPES = ['PURCHASE_SUCCEEDED', 'SUBSCRIPTION_STARTED', 'SUBSCRIPTION_RENEWED'];
+// Ledger events that record a provider payment (one per order line).
+const GRANT_TYPES = ['PURCHASE_SUCCEEDED', 'SUBSCRIPTION_STARTED', 'SUBSCRIPTION_RENEWED', 'SEAT_POOL_PURCHASED'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Kinds whose whole population is checked on every run, so an OPEN issue that is no longer
 // found has really gone away and can be closed automatically.

@@ -7,6 +7,7 @@ const { requireAuth } = require("../auth");
 const { PaymentService } = require("../payment/service");
 const { courseCard, subscriptionCard } = require("../views");
 const { validateCoupon, resolveSubscriptionPrice } = require("../services/pricingEngine");
+const { isRenewal } = require("../services/subscriptions");
 
 // Helper to look up catalog item by id or slug safely
 function resolveCatalogProduct(catalog, key) {
@@ -86,8 +87,8 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
     const itemType = p.type || 'COURSE';
     await client.query(
       `INSERT INTO order_line_items (
-        order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         orderId,
         itemType,
@@ -96,7 +97,8 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
         1,
         p.durationDays || null,
         p.scope || null,
-        finalPayableCents // single item: it carries the whole (discounted) payment
+        finalPayableCents, // single item: it carries the whole (discounted) payment
+        itemType === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, req.user.id, p.scope),
       ]
     );
 

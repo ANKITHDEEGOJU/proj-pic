@@ -80,13 +80,20 @@ const { PgLedgerStore } = require("./stores/pgLedgerStore");
   );
   console.log("[ok] second refund of same purchase rejected");
 
+  // M4: the course was bought twice (buy + the race purchase); refunding one keeps the other.
+  assert.equal(e1.decisions.evaluateAccess(u.id, pid).reason, "ACTIVE_PURCHASE");
+  const refund2 = ev({ eventType: "REFUND", referenceeventId: "evt_race_" + u.id });
+  await e1.ledger.appendEvent(refund2, {});
+  assert.equal(e1.decisions.evaluateAccess(u.id, pid).reason, "PURCHASE_REFUNDED");
+  console.log("[ok] M4 two purchases of one course: refunding one keeps access, refunding both removes it");
+
   const e2 = make();
   await e2.projection.rebuildFromLedger(); // simulated restart
   const d = e2.decisions.evaluateAccess(u.id, pid);
   assert.deepEqual(d, {
     allowed: false,
     reason: "PURCHASE_REFUNDED",
-    sourceEventIds: [refund.eventId],
+    sourceEventIds: [refund2.eventId],
   });
   console.log("[ok] restart: projection rebuilt from DB ->", JSON.stringify(d));
 

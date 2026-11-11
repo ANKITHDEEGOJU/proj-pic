@@ -59,6 +59,12 @@ router.get('/admin', requireAdmin, async (req, res) => {
         </div>
 
         <div class="card">
+          <h3>Organizations & Seats</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Every organization, its seat packs and who holds each seat.</p>
+          <a href="/admin/orgs"><button class="alt">View Organizations →</button></a>
+        </div>
+
+        <div class="card">
           <h3>Reconciliation & Webhooks</h3>
           <p style="color: #5B5F6E; margin-bottom: 1rem;">Provider vs ledger discrepancies, automatic repairs, and failed / dead webhook deliveries.</p>
           <a href="/admin/reconciliation"><button class="alt">Open Reconciliation →</button></a>

@@ -33,12 +33,16 @@ const EVENT_EFFECT = Object.freeze({
   MANUAL_REVOKE:          'REVOKE',
   SEAT_UNASSIGNED:        'REVOKE',
   PURCHASE_FAILED:        'NONE',
+  // M4: an organization paid for N seats of a course. Records the money (refundable) but
+  // gives the buyer no access by itself; access comes from SEAT_ASSIGNED events.
+  SEAT_POOL_PURCHASED:    'POOL',
 });
 // Event types that must point at an earlier event via referenceeventId.
 const NEEDS_REFERENCE = Object.keys(EVENT_EFFECT).filter(
   (t) => EVENT_EFFECT[t] === 'REVOKE' || EVENT_EFFECT[t] === 'STOP_RENEW',
 );
-const SOURCES = Object.freeze(['PAYMENT', 'ADMIN', 'SCHOLARSHIP', 'ORG_SEAT', 'SYSTEM']);
+// CUSTOMER: the user acted on their own account (e.g. cancelled renewal of their subscription).
+const SOURCES = Object.freeze(['PAYMENT', 'ADMIN', 'SCHOLARSHIP', 'ORG_SEAT', 'SYSTEM', 'CUSTOMER']);
 
 module.exports.EVENT_EFFECT = EVENT_EFFECT;
 module.exports.NEEDS_REFERENCE = NEEDS_REFERENCE;

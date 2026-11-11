@@ -24,12 +24,16 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   app.use(express.urlencoded({ extended: true }));
   app.use(express.json());
   app.use(cookieParser());
+  app.use(require('./services/cartSession')); // keeps the applied coupon across page loads
   app.use(attachUser);
   app.use((req, res, next) => {
   if (req.method === 'POST') {
     console.log(`\n[${new Date().toISOString()}] POST ${req.path}`);
     console.log('Headers:', { 'content-type': req.headers['content-type'], 'hx-request': req.headers['hx-request'] });
-    console.log('Body:', req.body);
+    // Never write passwords (login / register forms) to the log.
+    const body = req.body && typeof req.body === 'object' ? { ...req.body } : req.body;
+    if (body && typeof body === 'object') for (const k of Object.keys(body)) if (/pass(word)?|secret|token/i.test(k)) body[k] = '[redacted]';
+    console.log('Body:', body);
   }
   next();
 });
@@ -39,6 +43,8 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   app.use(require("./routes/cart"));
   app.use(require("./routes/commerce"));
   app.use(require("./routes/checkout"));
+  app.use(require("./routes/subscription")); // M4: renew / cancel renewal
+  app.use(require("./routes/org"));          // M4: organizations and seat packs
   const port = 3000;
 
   app.use((err, req, res, _next) => {
