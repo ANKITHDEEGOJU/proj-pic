@@ -13,30 +13,37 @@ CREATE TABLE IF NOT EXISTS users (
 -- -----------------------------------------------------------------------------
 -- 2. Courses Table & Seed Data
 -- -----------------------------------------------------------------------------
+-- 1. Create Unified Products Table
 CREATE TABLE IF NOT EXISTS courses (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  slug        TEXT NOT NULL UNIQUE,
-  title       TEXT NOT NULL,
-  description TEXT NOT NULL,
-  price_cents INTEGER NOT NULL CHECK (price_cents > 0),
-  currency    CHAR(3) NOT NULL DEFAULT 'USD',
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  id VARCHAR(100) PRIMARY KEY,
+  slug VARCHAR(100) UNIQUE NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  price_cents INT NOT NULL,
+  currency VARCHAR(10) DEFAULT 'USD',
+  type VARCHAR(20) NOT NULL DEFAULT 'COURSE', -- 'COURSE', 'SUBSCRIPTION'
+  duration_days INT DEFAULT NULL,             -- NULL for courses, e.g. 30/365 for subs
+  scope VARCHAR(50) DEFAULT NULL,             -- NULL for courses, 'ALL_ACCESS' for subs
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-INSERT INTO courses (slug, title, description, price_cents) VALUES
-  ('intro-to-sql',      'Intro to SQL',       'Queries, joins and indexes from zero.',      2000),
-  ('event-sourcing-101','Event Sourcing 101', 'Ledgers, projections and replay.',           3500),
-  ('payments-in-depth', 'Payments in Depth',  'Webhooks, idempotency and reconciliation.',  5000)
-ON CONFLICT (slug) DO NOTHING;
+-- 2. Seed All Sellable Products (Courses + Subscriptions)
+INSERT INTO courses (id, slug, name, description, price_cents, currency, type, duration_days, scope) VALUES
+  ('intro-to-sql',       'intro-to-sql',       'Intro to SQL',          'Queries, joins and indexes from zero.',      2000,  'USD', 'COURSE',       NULL, NULL),
+  ('event-sourcing-101', 'event-sourcing-101', 'Event Sourcing 101',    'Ledgers, projections and replay.',           3500,  'USD', 'COURSE',       NULL, NULL),
+  ('payments-in-depth',  'payments-in-depth',  'Payments in Depth',     'Webhooks, idempotency and reconciliation.',  5000,  'USD', 'COURSE',       NULL, NULL),('sub_monthly',        'sub_monthly',        'Monthly All-Access Pass','30-day access to all courses.',             2999,  'USD', 'SUBSCRIPTION', 30,   'ALL_ACCESS')
+ON CONFLICT (id) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
 -- 3. Cart Items Table
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cart_items (
-  user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  product_id TEXT        NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, product_id)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id VARCHAR(100) NOT NULL REFERENCES courses(id) ON DELETE CASCADE, -- ✅ Points to products!
+  quantity INT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, product_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_cart_items_user ON cart_items (user_id);
@@ -83,22 +90,35 @@ INSERT INTO pricing_rules (
   '{"*"}'
 ) ON CONFLICT DO NOTHING;
 
--- -----------------------------------------------------------------------------
--- 5. Orders Table (Checkout Audit & Pricing Trail)
--- -----------------------------------------------------------------------------
+-- 1. Create Orders Header Table
 CREATE TABLE IF NOT EXISTS orders (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  subtotal_cents      INTEGER NOT NULL CHECK (subtotal_cents >= 0),
-  discount_cents      INTEGER NOT NULL DEFAULT 0 CHECK (discount_cents >= 0),
-  final_payable_cents INTEGER NOT NULL CHECK (final_payable_cents >= 0),
-  applied_rule_id     UUID REFERENCES pricing_rules(id) ON DELETE SET NULL,
-  provider            TEXT NOT NULL CHECK (provider IN ('mock', 'razorpay')),
-  status              TEXT NOT NULL CHECK (status IN ('PENDING', 'COMPLETED', 'FAILED', 'REFUNDED')),
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  subtotal_cents INT NOT NULL,
+  discount_cents INT NOT NULL DEFAULT 0,
+  final_payable_cents INT NOT NULL,
+  applied_rule_id VARCHAR(50) DEFAULT NULL,
+  provider VARCHAR(20) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS ix_orders_user ON orders (user_id);
+-- 2. Create Order Line Items Table
+CREATE TABLE IF NOT EXISTS order_line_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  item_type VARCHAR(20) NOT NULL, -- 'COURSE', 'SUBSCRIPTION', 'BUNDLE'
+  item_id VARCHAR(100) NOT NULL,   -- e.g. 'intro-to-sql', 'sub_monthly', 'sub_annual'
+  unit_price_cents INT NOT NULL,
+  quantity INT NOT NULL DEFAULT 1,
+  duration_days INT DEFAULT NULL, -- e.g. 30, 365 (NULL for perpetual courses)
+  scope VARCHAR(50) DEFAULT 'ALL_ACCESS', -- 'ALL_ACCESS', 'DATA_SCIENCE', etc.
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for fast webhook joins
+CREATE INDEX IF NOT EXISTS idx_order_line_items_order_id ON order_line_items(order_id);
 
 -- -----------------------------------------------------------------------------
 -- 6. Commerce Ledger Table (Append-Only Source of Truth)

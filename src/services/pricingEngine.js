@@ -40,51 +40,99 @@ function checkUserEligibility(userEmail, targets) {
  * Tier 2: Specific Email Domain Override
  * Tier 3: Global Baseline Default
  */
-async function resolveSubscriptionPrice(user) {
-  const query = `
-    SELECT * FROM pricing_rules
-    WHERE applicable_product IN ('SUBSCRIPTION_ONLY', 'ALL')
-      AND application_mode IN ('AUTOMATIC_IDENTITY', 'GLOBAL_DEFAULT')
-      AND is_disabled = false
-      AND start_at <= now()
-      AND (expires_at IS NULL OR expires_at >= now())
-    ORDER BY
-      CASE
-        WHEN application_mode = 'AUTOMATIC_IDENTITY' THEN 1
-        WHEN application_mode = 'GLOBAL_DEFAULT' THEN 2
-        ELSE 3
-      END;
-  `;
+async function resolveSubscriptionPrice(user, productId = 'sub_monthly', catalog = null) {
+  // 1. Get base product defaults from catalog (fallback if DB has no rules)
+  const catalogItem = catalog ? catalog.get(productId) : null;
+  const basePriceCents = catalogItem?.priceCents ?? (catalogItem?.price ? Math.round(catalogItem.price * 100) : 2999);
+  const baseDurationDays = catalogItem?.durationDays ?? 30;
+  const productName = catalogItem?.name ?? 'LearnX All-Access Pass';
+  const currency = catalogItem?.currency ?? 'USD';
 
-  const { rows } = await pool.query(query);
-  const userEmail = user ? user.email : '';
+  const userEmail = (user?.email || '').trim().toLowerCase();
 
-  // 1. Specific Email Match
-  const emailRule = rows.find(
-    r => r.application_mode === 'AUTOMATIC_IDENTITY' &&
-         r.eligibility_targets.some(t => !t.startsWith('@') && t.toLowerCase() === userEmail.toLowerCase())
-  );
-  if (emailRule) {
-    return { priceCents: emailRule.value, durationDays: emailRule.duration_days, rule: emailRule };
+  try {
+    const query = `
+      SELECT * FROM pricing_rules
+      WHERE applicable_product IN ($1, 'SUBSCRIPTION_ONLY', 'ALL')
+        AND application_mode IN ('AUTOMATIC_IDENTITY', 'GLOBAL_DEFAULT')
+        AND is_disabled = false
+        AND start_at <= now()
+        AND (expires_at IS NULL OR expires_at >= now())
+      ORDER BY
+        CASE
+          WHEN application_mode = 'AUTOMATIC_IDENTITY' THEN 1
+          WHEN application_mode = 'GLOBAL_DEFAULT' THEN 2
+          ELSE 3
+        END,
+        created_at DESC;
+    `;
+
+    const { rows } = await pool.query(query, [productId]);
+
+    const getTargets = (r) => Array.isArray(r.eligibility_targets) ? r.eligibility_targets : [];
+
+    if (userEmail) {
+      // Step A: Specific Email Match
+      const emailRule = rows.find(r =>
+        r.application_mode === 'AUTOMATIC_IDENTITY' &&
+        getTargets(r).some(t => typeof t === 'string' && !t.startsWith('@') && t.toLowerCase() === userEmail)
+      );
+      if (emailRule) {
+        return {
+          productId: catalogItem?.id || productId,
+          name: productName,
+          currency,
+          priceCents: emailRule.value ?? basePriceCents,
+          durationDays: emailRule.duration_days ?? baseDurationDays,
+          rule: emailRule
+        };
+      }
+
+      // Step B: Domain Match (e.g., '@company.com')
+      const userDomain = userEmail.includes('@') ? '@' + userEmail.split('@')[1] : '';
+      if (userDomain) {
+        const domainRule = rows.find(r =>
+          r.application_mode === 'AUTOMATIC_IDENTITY' &&
+          getTargets(r).some(t => typeof t === 'string' && t.startsWith('@') && t.toLowerCase() === userDomain)
+        );
+        if (domainRule) {
+          return {
+            productId: catalogItem?.id || productId,
+            name: productName,
+            currency,
+            priceCents: domainRule.value ?? basePriceCents,
+            durationDays: domainRule.duration_days ?? baseDurationDays,
+            rule: domainRule
+          };
+        }
+      }
+    }
+
+    // Step C: Global Default Fallback Rule
+    const globalRule = rows.find(r => r.application_mode === 'GLOBAL_DEFAULT');
+    if (globalRule) {
+      return {
+        productId: catalogItem?.id || productId,
+        name: productName,
+        currency,
+        priceCents: globalRule.value ?? basePriceCents,
+        durationDays: globalRule.duration_days ?? baseDurationDays,
+        rule: globalRule
+      };
+    }
+  } catch (err) {
+    console.error('[resolveSubscriptionPrice] DB Query Error:', err.message);
   }
 
-  // 2. Domain Match
-  const userDomain = userEmail.includes('@') ? '@' + userEmail.split('@')[1].toLowerCase() : '';
-  const domainRule = rows.find(
-    r => r.application_mode === 'AUTOMATIC_IDENTITY' &&
-         r.eligibility_targets.some(t => t.startsWith('@') && t.toLowerCase() === userDomain)
-  );
-  if (domainRule) {
-    return { priceCents: domainRule.value, durationDays: domainRule.duration_days, rule: domainRule };
-  }
-
-  // 3. Global Default Fallback
-  const globalRule = rows.find(r => r.application_mode === 'GLOBAL_DEFAULT');
-  if (globalRule) {
-    return { priceCents: globalRule.value, durationDays: globalRule.duration_days, rule: globalRule };
-  }
-
-  return { priceCents: 2999, durationDays: 30, rule: null };
+  // 2. Standard Catalog Fallback
+  return {
+    productId: catalogItem?.id || productId,
+    name: productName,
+    currency,
+    priceCents: basePriceCents,
+    durationDays: baseDurationDays,
+    rule: null
+  };
 }
 
 /**
@@ -133,9 +181,11 @@ async function validateCoupon(code, user, isSubscriptionCart, cartItems = []) {
     const subPrice = await resolveSubscriptionPrice(user);
     subtotalCents = subPrice.priceCents;
   } else {
-    subtotalCents = cartItems.reduce((sum, item) => sum + Math.round(item.price * 100), 0);
+    console.log("Subtotal - ",subtotalCents );
+    subtotalCents = cartItems.reduce((sum, item) => sum + item.unit_price_cents,0);
+    console.log("Subtotal - ",subtotalCents );
   }
-
+  
   // Course Scoping & Eligible Subtotal Filter
   let eligibleSubtotalCents = subtotalCents;
 
@@ -173,7 +223,7 @@ async function validateCoupon(code, user, isSubscriptionCart, cartItems = []) {
   // Floor constraint: Discount cannot exceed eligible subtotal
 discountCents = Math.min(discountCents, eligibleSubtotalCents);
 const finalPayableCents = subtotalCents - discountCents;
-
+//console.log(finalPayableCents,subtotalCents,discountCents)
 return {
     valid: true,
     rule,

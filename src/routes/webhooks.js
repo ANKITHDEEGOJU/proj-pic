@@ -46,8 +46,8 @@ router.post(
     // 2. Write raw payload to inbox first (idempotent via ON CONFLICT).
     const { rows } = await pool.query(
       `INSERT INTO webhook_inbox (provider, provider_event_id, raw_body, headers)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (provider, provider_event_id) DO UPDATE SET status=webhook_inbox.status
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (provider, provider_event_id) DO UPDATE SET status=webhook_inbox.status
        RETURNING *`,
       [adapter.name, providerEventId, rawBody, JSON.stringify(req.headers)],
     );

@@ -7,46 +7,35 @@ class PaymentService {
     this.catalog = catalog;
   }
 
-  async initiatePayment({ userId, productId, amount, orderId, provider}) {
+  async initiatePayment({ userId, productId = null, amount, orderId, provider }) {
+    const p = (productId && this.catalog) ? this.catalog.get(productId) : null;
 
-	const p = this.catalog ? this.catalog.get(productId) : null;
-
-    // Strict validation: Throw 'Unknown product' IF amount is missing AND product isn't in catalog
+    // Strict validation: Throw error if amount is missing and product isn't in catalog
     if (!p && amount === undefined) {
-      throw new Error(`Unknown product: ${productId}`);
+      throw new Error(`Unknown product or missing payment amount.`);
     }
+
     const adapter = getAdapter(provider);
-
-    // 1. Amount: Use explicit amount override (e.g. discounted cart) OR fallback to catalog price
     const finalAmount = amount !== undefined ? Number(amount) : p.price;
-
-    // 2. Currency: Use catalog currency or default to USD
     const currency = p?.currency || "USD";
-
-    // 3. Order Reference: Use database orderId if provided, else fallback to random UUID
     const orderRef = orderId ? String(orderId) : `order_${randomUUID()}`;
 
     const { providerPaymentId, redirectUrl } = await adapter.createPayment({
       orderRef,
       userId,
-      productId,
+      productId: productId || "multi_item_order",
       amount: finalAmount,
       currency,
     });
+
     return { orderRef, providerPaymentId, redirectUrl, provider };
   }
 
-  async initiateRefund({
-    userId,
-    productId,
-    amount,
-    providerPaymentId,
-    provider = "mock",
-  }) {
-    const p = this.catalog ? this.catalog.get(productId) : null;
+  async initiateRefund({ userId, productId, amount, providerPaymentId, provider = "mock" }) {
+    const p = (productId && this.catalog) ? this.catalog.get(productId) : null;
 
     if (!p && amount === undefined) {
-      throw new Error(`Unknown product: ${productId}`);
+      throw new Error(`Unknown product or missing refund amount.`);
     }
 
     const adapter = getAdapter(provider);

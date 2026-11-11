@@ -1,7 +1,25 @@
+'use strict';
+
 const router = require('express').Router();
+const { randomUUID } = require('node:crypto');
 const pool = require('../db');
 const { layout, esc } = require('../views');
 const { getRuleStatus } = require('../services/pricingEngine');
+
+// Helper to look up catalog item by id or slug safely
+function resolveCatalogProduct(catalog, key) {
+  if (!catalog || !key) return null;
+  if (typeof catalog.get === 'function') {
+    const item = catalog.get(key);
+    if (item) return item;
+  }
+  if (typeof catalog.list === 'function') {
+    for (const item of catalog.list()) {
+      if (item.id === key || item.slug === key) return item;
+    }
+  }
+  return null;
+}
 
 /**
  * Gatekeeper Middleware: Restricts access to admin users matching ADMIN_EMAIL
@@ -21,22 +39,241 @@ function requireAdmin(req, res, next) {
 }
 
 // GET /admin - Admin Overview Dashboard
-router.get('/admin', requireAdmin, (req, res) => {
-  const body = `
-    <h2>Admin Panel</h2>
-    <div class="card" style="margin-bottom: 1.5rem;">
-      <h3>Welcome, ${esc(req.user.email)}!</h3>
-      <p style="color: #5B5F6E; margin-top: 0.5rem;">System status: <strong>Active</strong></p>
-    </div>
+router.get('/admin', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT COUNT(*) FROM users');
+    const userCount = rows[0].count;
 
-    <div class="card">
-      <h3>Management Modules</h3>
-      <p style="color: #5B5F6E; margin-bottom: 1rem;">Configure pricing rules, discounts, domain overrides, and coupons.</p>
-      <a href="/admin/pricing-rules"><button>Manage Pricing & Coupons →</button></a>
-    </div>
-  `;
+    const body = `
+      <h2>Admin Panel</h2>
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <h3>Welcome, ${esc(req.user.email)}!</h3>
+        <p style="color: #5B5F6E; margin-top: 0.5rem;">System status: <strong>Active</strong> | Registered Users: <strong>${userCount}</strong></p>
+      </div>
 
-  res.send(layout('Admin Panel', body, req.user));
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <div class="card">
+          <h3>User Entitlements & Access</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">View all registered users (${userCount}), inspect active access, grant new courses/subscriptions, or revoke entitlements.</p>
+          <a href="/admin/users"><button>Manage Users & Access (${userCount}) →</button></a>
+        </div>
+
+        <div class="card">
+          <h3>Pricing Rules & Coupons</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Configure pricing rules, discounts, domain overrides, and promo coupons.</p>
+          <a href="/admin/pricing-rules"><button class="alt">Manage Pricing & Coupons →</button></a>
+        </div>
+      </div>
+    `;
+
+    res.send(layout('Admin Panel', body, req.user));
+  } catch (err) {
+    console.error('Error rendering admin panel:', err);
+    res.status(500).send('Internal Server Error');
+  }
+});
+
+// GET /admin/users - User Entitlements Management
+router.get('/admin/users', requireAdmin, async (req, res) => {
+  const { catalog, projection } = req.app.locals.engine;
+
+  try {
+    const { rows: users } = await pool.query(
+      'SELECT id, email, created_at FROM users ORDER BY created_at DESC'
+    );
+
+    const projectionSnapshot = projection.snapshot();
+    const allProducts = catalog.list ? catalog.list() : [];
+
+    const productOptions = allProducts.map(p => `
+      <option value="${esc(p.slug || p.id)}">${esc(p.name || p.title || p.id)} (${p.type || 'COURSE'})</option>
+    `).join('');
+
+const userRowsHtml = users.map(u => {
+      const userEntitlements = Object.values(projectionSnapshot).filter(
+        ent => String(ent.userId) === String(u.id) && ent.status === 'ACTIVE'
+      );
+
+      const entitlementBadges = userEntitlements.length > 0
+        ? userEntitlements.map(ent => {
+            const p = resolveCatalogProduct(catalog, ent.productId);
+            const title = p ? (p.name || p.title) : ent.productId;
+            const isSub = ent.type === 'SUBSCRIPTION';
+
+            return `
+              <div style="display: inline-flex; align-items: center; gap: 0.5rem; background: #e8f5e9; border: 1px solid #a5d6a7; padding: 0.25rem 0.6rem; border-radius: 20px; font-size: 0.8rem; margin: 0.2rem 0.3rem 0.2rem 0;">
+                <span style="color: #1b5e20; font-weight: 600;">✓ ${esc(title)} ${isSub ? '(Sub)' : ''}</span>
+                <form action="/admin/users/revoke" method="POST" style="display: inline; margin: 0;">
+                  <input type="hidden" name="userId" value="${esc(u.id)}">
+                  <input type="hidden" name="productId" value="${esc(ent.productId)}">
+                  <button type="submit" title="Revoke Access" style="background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 0.2s;">
+                    Revoke
+                  </button>
+                </form>
+              </div>
+            `;
+          }).join('')
+        : '<span style="color: #888; font-size: 0.85rem; italic">No Active Access</span>';
+
+      return `
+        <tr>
+          <td><strong>${esc(u.email)}</strong><br><small style="color:#666">ID: ${esc(u.id)}</small></td>
+          <td><small>${new Date(u.created_at).toLocaleDateString()}</small></td>
+          <td style="vertical-align: middle;">${entitlementBadges}</td>
+          <td>
+            <form action="/admin/users/grant" method="POST" style="display: flex; gap: 0.5rem; align-items: center;">
+              <input type="hidden" name="userId" value="${esc(u.id)}">
+              <select name="productId" style="padding: 0.38rem; border-radius: 4px; border: 1px solid #ccc; font-size: 0.85rem;" required>
+                <option value="" disabled selected>Select course/sub...</option>
+                ${productOptions}
+              </select>
+              <button type="submit" style="padding: 0.38rem 0.8rem; font-size: 0.85rem;">Grant Access</button>
+            </form>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const body = `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2>User Management (${users.length} Users)</h2>
+        <a href="/admin"><button class="alt">← Back to Admin Overview</button></a>
+      </div>
+
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <p style="color: #5B5F6E; margin: 0;">
+          Granting or revoking access appends <code>PURCHASE_SUCCEEDED</code> or <code>REFUND</code> events to the <code>commerce_ledger</code>.
+          The entitlement projection engine updates automatically in real-time.
+        </p>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Registered</th>
+            <th>Active Entitlements</th>
+            <th>Grant Access</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${userRowsHtml.length > 0 ? userRowsHtml : '<tr><td colspan="4" style="text-align:center; color:#666;">No users registered yet.</td></tr>'}
+        </tbody>
+      </table>
+    `;
+
+    res.send(layout('Admin - User Management', body, req.user));
+  } catch (err) {
+    console.error('Error rendering admin users page:', err);
+    res.status(500).send('Internal Server Error');
+  }
+});
+
+// POST /admin/users/grant - Manually Grant Course or Subscription Access
+router.post('/admin/users/grant', requireAdmin, async (req, res) => {
+  const { userId, productId } = req.body;
+  const { catalog, ledger } = req.app.locals.engine;
+
+  if (!userId || !productId) {
+    return res.status(400).send('Missing userId or productId');
+  }
+
+  try {
+    const product = resolveCatalogProduct(catalog, productId);
+    if (!product) {
+      return res.status(404).send('Product not found in catalog');
+    }
+
+    const targetProductId = product.slug || product.id;
+    const itemType = product.type || 'COURSE';
+    const durationDays = product.durationDays || (itemType === 'SUBSCRIPTION' ? 30 : null);
+    const scope = product.scope || (itemType === 'SUBSCRIPTION' ? 'ALL_ACCESS' : null);
+
+    const productSnapshot = {
+      id: targetProductId,
+      slug: targetProductId,
+      title: product.name || product.title || targetProductId,
+      type: itemType,
+      durationDays,
+      scope
+    };
+
+    // Append PURCHASE_SUCCEEDED event to Commerce Ledger
+    await ledger.appendEvent(
+      {
+        eventId: `admin_grant_${randomUUID()}`,
+        eventType: 'PURCHASE_SUCCEEDED',
+        userId: String(userId),
+        productId: targetProductId,
+        quantity: 1,
+        amount: 0,
+        currency: product.currency || 'USD',
+        occurredAt: new Date().toISOString()
+      },
+      {
+        method: 'ADMIN_MANUAL_GRANT',
+        grantedBy: req.user.email,
+        itemType,
+        durationDays,
+        scope
+      },
+      productSnapshot
+    );
+
+    res.redirect('/admin/users');
+  } catch (err) {
+    console.error('Error granting user access:', err);
+    res.status(500).send(`Failed to grant access: ${err.message}`);
+  }
+});
+
+// POST /admin/users/revoke - Manually Revoke Access
+router.post('/admin/users/revoke', requireAdmin, async (req, res) => {
+  const { userId, productId } = req.body;
+  const { catalog, projection, ledger } = req.app.locals.engine;
+
+  if (!userId || !productId) {
+    return res.status(400).send('Missing userId or productId');
+  }
+
+  try {
+    const product = resolveCatalogProduct(catalog, productId);
+    const targetProductId = product ? (product.slug || product.id) : productId;
+
+    // Retrieve active entitlement from projection engine
+    let ent = projection.get(userId, targetProductId);
+    if (!ent && (product?.type === 'SUBSCRIPTION' || targetProductId.includes('sub'))) {
+      ent = projection.getSubscription(userId, product?.scope || 'ALL_ACCESS');
+    }
+
+    if (!ent || ent.status !== 'ACTIVE') {
+      return res.redirect('/admin/users');
+    }
+
+    // Append REFUND event to Commerce Ledger referencing original event
+    await ledger.appendEvent(
+      {
+        eventId: `admin_ref_${randomUUID()}`,
+        eventType: 'REFUND',
+        userId: String(userId),
+        productId: targetProductId,
+        quantity: 1,
+        amount: 0,
+        currency: product?.currency || 'USD',
+        occurredAt: new Date().toISOString(),
+        referenceeventId: ent.sourceEventId
+      },
+      {
+        method: 'ADMIN_MANUAL_REVOKE',
+        revokedBy: req.user.email
+      }
+    );
+
+    res.redirect('/admin/users');
+  } catch (err) {
+    console.error('Error revoking user access:', err);
+    res.status(500).send(`Failed to revoke access: ${err.message}`);
+  }
 });
 
 // GET /admin/pricing-rules - Full Pricing Rules & Coupons Dashboard
@@ -290,7 +527,5 @@ router.post('/admin/pricing-rules/:id/toggle', requireAdmin, async (req, res) =>
     res.status(500).end();
   }
 });
-
-module.exports = router;
 
 module.exports = router;

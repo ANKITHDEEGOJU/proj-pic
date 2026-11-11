@@ -1,12 +1,15 @@
+'use strict';
+
 const esc = (s) =>
-  String(s).replace(
+  String(s ?? '').replace(
     /[&<>"']/g,
     (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[
         c
-      ],
+      ]
   );
-const money = (cents, cur) => `${(cents / 100).toFixed(2)} ${esc(cur)}`;
+
+const money = (cents, cur = 'USD') => `${((cents || 0) / 100).toFixed(2)} ${esc(cur)}`;
 
 const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <html><head><meta charset="utf-8"><title>${esc(title)} · LEARNX</title>
@@ -173,126 +176,184 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <nav>
 <span>
 <strong style="font-family: 'monospace';"><i>LearnX</i></strong>
-${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a>${user ? navCart(cartCount):''} ${user.isAdmin ? '<a href="/admin">Panel</a>':""}` : ""}</span>
-${user ? `<span>${esc(user.email)} <button hx-post="/logout">Logout</button></span>` : ""}
+${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
+${user ? `<span>${esc(user.email)} <button hx-post="/logout">Logout</button></span>` : ''}
 </nav>
 ${body}</body></html>`;
 
 const authForm = (kind) => `
-<h2>${kind === "login" ? "Login" : "Register"}</h2>
+<h2>${kind === 'login' ? 'Login' : 'Register'}</h2>
 <form hx-post="/${kind}" hx-target="#msg">
   <input name="email" type="email" placeholder="email" required>
   <input name="password" type="password" placeholder="password (min 8)" required minlength="8">
-  <button>${kind === "login" ? "Login" : "Create account"}</button>
+  <button>${kind === 'login' ? 'Login' : 'Create account'}</button>
 </form>
 <div id="msg" class="err"></div>
-<p>${kind === "login" ? '<a href="/register">Need an account?</a>' : '<a href="/login">Have an account?</a>'}</p>`;
+<p>${kind === 'login' ? '<a href="/register">Need an account?</a>' : '<a href="/login">Have an account?</a>'}</p>`;
 
-// One course card; `d` is the EntitlementDecision for this user. Swapped in place by HTMX.
-const courseCard = (p, d, msg = "", pending = false,inCart = false) => {
+const courseCard = (p, d, msg = '', pending = false, inCart = false) => {
   const s = esc(p.slug || p.id),
     id = `c-${s}`,
-    t = `hx-target="#${id}" hx-swap="outerHTML"`
+    t = `hx-target="#${id}" hx-swap="outerHTML"`;
+
+  const priceVal = typeof p.price === 'number' ? p.price : ((p.priceCents || 0) / 100);
+  const formattedPrice = priceVal.toFixed(2);
+  const currencyStr = esc(p.currency || 'USD');
 
   const badge = d.allowed
     ? '<span class="ok">Owned</span>'
-    : d.reason === "PURCHASE_REFUNDED"
+    : d.reason === 'PURCHASE_REFUNDED'
       ? '<span class="err">Refunded</span>'
-      : "";
+      : '';
 
   const triggers = pending
-    ? "every 2s, cartUpdated from:body"
-    : "cartUpdated from:body";    
-  // Pending state: Razorpay refund webhook not yet received.
-  // Poll GET /courses/:slug/card every 2s. Server returns normal card once PURCHASE_REFUNDED,
-  // which has no hx-trigger, so polling stops automatically.
+    ? 'every 2s, cartUpdated from:body'
+    : 'cartUpdated from:body';
+
   if (pending) {
     return `<div class="card" id="${id}"
   hx-get="/courses/${s}/card"
   hx-trigger="${triggers}"
   hx-swap="outerHTML">
-  <h3>${esc(p.name)} <span style="color:#d29922">⏳ Refund pending…</span></h3>
-  <strong>${p.price.toFixed(2)} ${esc(p.currency)}</strong><br>
+  <h3>${esc(p.name || p.title)} <span style="color:#d29922">⏳ Refund pending…</span></h3>
+  <strong>$${formattedPrice} ${currencyStr}</strong><br>
   <button disabled style="background:#5B5F6E">Refund pending</button>
   <button class="alt" disabled>Play</button>
-  <div class="msg">Waiting for Razorpay to confirm the refund…</div>
+  <div class="msg">Waiting for payment provider to confirm refund…</div>
 </div>`;
   }
 
-  return `<div class="card" id="${id}" hx-get="/courses/${s}/card" hx-trigger="cartUpdated from:body" hx-swap="outerHTML"><h3>${esc(p.name)} ${badge}</h3>
-<strong>${p.price.toFixed(2)} ${esc(p.currency)}</strong><br>
+  return `<div class="card" id="${id}" hx-get="/courses/${s}/card" hx-trigger="cartUpdated from:body" hx-swap="outerHTML"><h3>${esc(p.name || p.title)} ${badge}</h3>
+<strong>$${formattedPrice} ${currencyStr}</strong><br>
 ${
   d.allowed
     ? `<button hx-post="/courses/${s}/checkout/refund" ${t}>Refund</button> <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
-    : inCart?`<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
-    :`<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`
+    : inCart
+      ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
+      : `<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`
 }
 </div>`;
 };
 
+const subscriptionCard = (
+  inCart = false,
+  subPriceInfo = null,
+  isSubActive = false,
+  subEnt = null
+) => {
+  const id = 'sub-card';
+  const targetAttr = `hx-target="#${id}" hx-swap="outerHTML"`;
+
+  const subProductId = esc(subPriceInfo?.productId || subPriceInfo?.id || 'sub_monthly');
+  const planTitle = esc(subPriceInfo?.name || subPriceInfo?.title || 'LearnX All-Access Pass');
+  const priceCents = subPriceInfo?.priceCents ?? 2999;
+  const durationDays = subPriceInfo?.durationDays ?? 30;
+  const currencyStr = esc(subPriceInfo?.currency || 'USD');
+  const ruleName = subPriceInfo?.rule?.rule_name;
+  const formattedPrice = (priceCents / 100).toFixed(2);
+
+  // Active Subscription View (Post-Purchase)
+  if (isSubActive) {
+    const expStr = subEnt?.expiresAt
+      ? new Date(subEnt.expiresAt).toLocaleDateString()
+      : 'Lifetime';
+
+    return `
+<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="cartUpdated from:body" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+    <div>
+      <h3 style="margin-bottom: 0.25rem; color: #1b5e20;">✓ ${planTitle} (Active)</h3>
+      <p style="color: #33691e; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+        You have unlimited streaming access to all courses. Expires: <strong>${expStr}</strong>
+      </p>
+    </div>
+    <span style="background: #2e7d32; color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase;">
+      Active Pass
+    </span>
+  </div>
+  <form hx-post="/courses/${subProductId}/checkout/refund" ${targetAttr} style="margin-top: 0.5rem;">
+    <button type="submit" style="background: #d32f2f; color: #ffffff; border: none; padding: 0.5rem 1.2rem; border-radius: 4px; font-weight: bold; cursor: pointer;">
+      Refund Subscription
+    </button>
+  </form>
+</div>`;
+  }
+
+  const customBadge =
+    ruleName && subPriceInfo?.rule?.application_mode === 'AUTOMATIC_IDENTITY'
+      ? `<div style="color: #2e7d32; font-size: 0.85rem; font-weight: bold; margin-top: 0.25rem;">★ Special Plan Applied: ${esc(
+          ruleName
+        )}</div>`
+      : '';
+
+  // Standard Subscription View (Unpurchased)
+  return `
+<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="cartUpdated from:body" hx-swap="outerHTML" style="border: 2px solid #2743D8; background: #ffffff;">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+    <div>
+      <h3 style="margin-bottom: 0.25rem;">${planTitle}</h3>
+      <p style="color: #5B5F6E; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+        Unlimited streaming access to all current and future courses.
+      </p>
+      ${customBadge}
+    </div>
+    <span style="background: #2e3140; color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase;">
+      Best Value
+    </span>
+  </div>
+  <strong style="font-size: 1.1rem; color: #111;">$${formattedPrice} ${currencyStr} / ${durationDays} days</strong><br><br>
+  ${
+    inCart
+      ? `<a href="/cart" style="text-decoration: none;"><button class="alt">In Cart · View Cart →</button></a>
+        <div class="msg ok">✓ Added to your cart</div>`
+      : `<button hx-post="/cart/add" hx-vals='{"productId": "${subProductId}"}' ${targetAttr}>
+          Add Subscription to Cart
+        </button>`
+  }
+</div>`;
+};
 const navCart = (count) => `
   <a href="/cart" id="nav-cart" hx-get="/cart/count" hx-trigger="cartUpdated from:body" hx-swap="outerHTML">Cart (${count})</a>
 `;
 
 const accessFragment = (d) =>
   d.allowed
-    ? `<span class="ok">▶ Allowed</span> · ${esc(d.reason)} · source: ${d.sourceEventIds.map(esc).join(", ")}`
-    : `<span class="err">⛔ Denied</span> · ${esc(d.reason)}${d.sourceEventIds.length ? " · source: " + d.sourceEventIds.map(esc).join(", ") : ""}`;
+    ? `<span class="ok">▶ Allowed</span> · ${esc(d.reason)} · source: ${d.sourceEventIds.map(esc).join(', ')}`
+    : `<span class="err">⛔ Denied</span> · ${esc(d.reason)}${d.sourceEventIds.length ? ' · source: ' + d.sourceEventIds.map(esc).join(', ') : ''}`;
 
 const activityPage = (records, ents) => `<h2>Entitlements</h2>
-<table><tr><th>Product</th><th>Status</th><th>Source event</th><th>Granted</th><th>Revoked</th></tr>
-${ents.map((e) => `<tr><td>${esc(e.productId)}</td><td>${esc(e.status)}</td><td>${esc(e.sourceEventId)}</td><td>${esc(e.grantedAt || "")}</td><td>${esc(e.revokedAt || "")}</td></tr>`).join("") || '<tr><td colspan="5">None</td></tr>'}</table>
+<table><tr><th>Product / Scope</th><th>Status</th><th>Source Event</th><th>Granted</th><th>Expires</th></tr>
+${
+  ents
+    .map((e) => {
+      const expirationText = e.expiresAt ? new Date(e.expiresAt).toLocaleDateString() : 'Perpetual';
+      const productOrScope = e.scope ? `${esc(e.productId || 'Subscription')} (${esc(e.scope)})` : esc(e.productId);
+      return `<tr><td>${productOrScope}</td><td>${esc(e.status)}</td><td>${esc(e.sourceEventId)}</td><td>${esc(e.grantedAt || '')}</td><td>${esc(expirationText)}</td></tr>`;
+    })
+    .join('') || '<tr><td colspan="5">None</td></tr>'
+}</table>
 <h2>Ledger (append-only)</h2>
 <table><tr><th>#</th><th>Type</th><th>Product</th><th>Amount</th><th>Event</th><th>Refs</th></tr>
-${records.map((r) => `<tr><td>${r.ledgerSequenceId}</td><td>${esc(r.event.eventType)}</td><td>${esc(r.event.productId)}</td><td>${r.event.amount} ${esc(r.event.currency)}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || "")}</td></tr>`).join("") || '<tr><td colspan="6">No events</td></tr>'}</table>`;
+${
+  records
+    .map(
+      (r) =>
+        `<tr><td>${r.ledgerSequenceId}</td><td>${esc(r.event.eventType)}</td><td>${esc(r.event.productId)}</td><td>${(r.event.amount || 0).toFixed(2)} ${esc(r.event.currency || 'USD')}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || '')}</td></tr>`
+    )
+    .join('') || '<tr><td colspan="6">No events</td></tr>'
+}</table>`;
 
 const errorFragment = (msg) => `<span class="err">${esc(msg)}</span>`;
-
-const subscriptionCard = (inCart = false, subPriceInfo = null) => {
-  const id = "sub-card";
-  const targetAttr = `hx-target="#${id}" hx-swap="outerHTML"`;
-  const priceCents = subPriceInfo?.priceCents ?? 2999;
-  const durationDays = subPriceInfo?.durationDays ?? 30;
-  const ruleName = subPriceInfo?.rule?.rule_name;
-  const formattedPrice = (priceCents / 100).toFixed(2);
-
-  const customBadge = ruleName && subPriceInfo?.rule?.application_mode === 'AUTOMATIC_IDENTITY'
-    ? `<div style="color: #2e7d32; font-size: 0.85rem; font-weight: bold; margin-top: 0.25rem;">★ Special Plan Applied: ${esc(ruleName)}</div>`
-    : '';
-
-  return `
-<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="cartUpdated from:body" hx-swap="outerHTML" style="border: 2px solid #2743D8; background: #ffffff;">
-  <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-    <div>
-      <h3 style="margin-bottom: 0.25rem;">StreamFlix All-Access Pass</h3>
-      <p style="color: #5B5F6E; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
-        Unlimited streaming access to all current and future courses.
-      </p>
-      ${customBadge}
-    </div>
-    <span style="background: #2743D8; color: #ffffff; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase;">
-      Best Value
-    </span>
-  </div>
-  <strong style="font-size: 1.1rem; color: #111;">$${formattedPrice} USD / ${durationDays} days</strong><br><br>
-  ${
-    inCart
-      ? `<a href="/cart" style="text-decoration: none;"><button class="alt">In Cart · View Cart →</button></a>
-         <div class="msg ok">✓ Added to your cart</div>`
-      : `<button hx-post="/cart/add" hx-vals='{"productId": "sub_monthly"}' ${targetAttr}>
-           Add Subscription to Cart
-         </button>`
-  }
-</div>`;
-};
 
 module.exports = {
   layout,
   authForm,
   courseCard,
+  subscriptionCard,
+  navCart,
   accessFragment,
   activityPage,
   errorFragment,
-  esc,subscriptionCard,navCart
+  esc,
 };

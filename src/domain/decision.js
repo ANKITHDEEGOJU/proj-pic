@@ -1,4 +1,5 @@
 "use strict";
+
 const { deepFreeze } = require("./util");
 
 class EntitlementDecisionEngine {
@@ -6,24 +7,47 @@ class EntitlementDecisionEngine {
     this.projection = projection;
   }
 
-  // Read-only. Enforcing D1 (allowed), D2 (machine-readable reason), D3 (sourceEventIds).
   evaluateAccess(userId, productId) {
-    const ent = this.projection.get(userId, productId);
-    let allowed = false,
-      reason = "NO_PURCHASE_RECORD",
-      sourceEventIds = [];
-    if (ent) {
-      sourceEventIds = [ent.sourceEventId];
-      if (ent.status === "ACTIVE") {
-        allowed = true;
-        reason = "ACTIVE_PURCHASE";
-      } else if (ent.status === "REVOKED") {
+    const nowMs = Date.now();
+
+    // 1. Direct Perpetual / Specific Course Entitlement Check
+    const directEnt = this.projection.get(userId, productId);
+    let reason = "NO_PURCHASE_RECORD";
+    let sourceEventIds = [];
+
+    if (directEnt) {
+      sourceEventIds = [directEnt.sourceEventId];
+      if (directEnt.status === "ACTIVE") {
+        if (directEnt.expiresAt && new Date(directEnt.expiresAt).getTime() <= nowMs) {
+          reason = "ENTITLEMENT_EXPIRED";
+        } else {
+          return deepFreeze({
+            allowed: true,
+            reason: "ACTIVE_PURCHASE",
+            sourceEventIds,
+          });
+        }
+      } else if (directEnt.status === "REVOKED") {
         reason = "PURCHASE_REFUNDED";
-      } else {
-        reason = "ENTITLEMENT_EXPIRED";
       }
     }
-    return deepFreeze({ allowed, reason, sourceEventIds });
+
+    // 2. Active Subscription Pass Fallback Check (ALL_ACCESS)
+    const subEnt = this.projection.getSubscription(userId, "ALL_ACCESS");
+    if (subEnt && subEnt.status === "ACTIVE") {
+      const isNotExpired = !subEnt.expiresAt || new Date(subEnt.expiresAt).getTime() > nowMs;
+      
+      if (isNotExpired) {
+        return deepFreeze({
+          allowed: true,
+          reason: "ACTIVE_SUBSCRIPTION_PASS",
+          sourceEventIds: [subEnt.sourceEventId],
+        });
+      }
+    }
+
+    return deepFreeze({ allowed: false, reason, sourceEventIds });
   }
 }
+
 module.exports = { EntitlementDecisionEngine };
