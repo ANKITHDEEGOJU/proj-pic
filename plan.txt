@@ -1,0 +1,130 @@
+M1 – Provider-neutral transaction model: Purchase, subscription, seat grant, scholarship/manual grant, refund, chargeback and expiry are represented independently of provider-specific payloads.
+
+M2 – Payment adapter and idempotency: At least one sandbox/mock provider drives the internal transaction flow, and duplicate/delayed/reordered webhook events cannot duplicate money-state or access-state changes.
+
+M3 – Entitlement ledger: Current access to products/courses/features is derived from auditable ledger history rather than manually toggled application flags.
+
+M4 – Commercial rules: Coupons/promotion rules, enterprise seat allocation/reassignment and subscription lifecycle are supported with clear conflict and expiry semantics.
+
+M5 – Usage quotas: AI-intensive or premium features can enforce per-user or pooled usage limits safely under concurrent requests.
+
+M6 – Refund and reconciliation: The system detects disagreement between provider-side payment state and internal ledger/entitlement state and safely repairs or escalates discrepancies.
+
+M7 – Agent-mediated purchase adapter: A sandbox flow can propose a purchase, require explicit user authorization, preserve the approved item/merchant/amount and reject tampered, replayed, expired or cancelled authorizations.
+
+M8 – Audit and failure validation: The complete transaction-to-entitlement history is inspectable, and injected network/provider failures converge to a correct state.
+
+Done when: A sandbox demonstration completes one-time, subscription and enterprise-seat flows, correctly changes access after refund/expiry, reconciles deliberately lost/duplicate events and demonstrates an optional agent-authorized purchase without coupling the core ledger to the agent-payment protocol.
+
+==================================================================
+STATUS (updated 2026-11-14)
+==================================================================
+M1 Transaction model ............ DONE
+M2 Adapter + idempotency ........ DONE
+M3 Entitlement ledger ........... DONE
+M4 Commercial rules ............. DONE
+M5 Usage quotas ................. DONE (not committed yet)
+M6 Refund + reconciliation ...... DONE
+M7 Agent-approved purchase ...... NOT STARTED (optional)
+M8 Audit + failure tests ........ PARTIAL
+
+Run all checks: npm run verify
+
+==================================================================
+COMPLETED
+==================================================================
+M1 - Transaction model (2026-08-12)
+  - Ledger events: PURCHASE, SUBSCRIPTION_STARTED/RENEWED/CANCELLED,
+    MANUAL_GRANT/REVOKE, CHARGEBACK, REFUND, SEAT_ASSIGNED/UNASSIGNED.
+    Each has a source (payment/admin/scholarship/org seat), actor and reason.
+  - Refund/chargeback/revoke must point at the event it undoes; only one
+    reversal per event (checked in code AND in the database).
+  - Free grants can't be refunded. A refund covers the whole order and asks
+    the provider for the amount actually paid (after coupons).
+  - Coupon discount is split across order lines, so ledger amounts add up.
+  - Subscriptions are stacked paid periods; refunding one month removes only
+    that month.
+  - Refunds are webhook-driven: access is removed only when the provider's
+    refund webhook arrives. A later refund.failed marks the order
+    REFUND_FAILED for admin review.
+  - UI: refund only on paid access, "Refund pending", Revoked / Charged back /
+    Expired badges, admin grant form with source + reason.
+
+M2 - Webhook retries and idempotency
+  - Every webhook is saved in webhook_inbox first, then processed.
+  - Failed rows are retried in the background: 30s, 60s, 120s ... up to 1h,
+    marked DEAD after 8 tries. Admin can retry a row by hand.
+  - A webhook that arrives too early (refund before its purchase) answers
+    HTTP 503 so the provider sends it again.
+  - Two deliveries of the same event at once are processed only once.
+
+M3 - Entitlement ledger
+  - Access is calculated from the append-only ledger (rebuilt at startup);
+    the database blocks UPDATE / DELETE / TRUNCATE on the ledger.
+
+M4 - Commercial rules
+  - Coupons and pricing rules; one coupon per order; coupon is remembered
+    across page reloads (cookie).
+  - Enterprise seats: organizations + seat packs (N seats of one course).
+    Assign / unassign / reassign by email; seats in use are counted from the
+    ledger; two people can't take the last seat at the same time.
+    Refunding a pack removes all its seats.
+  - Subscription Renew (stacked after current end) and Cancel renewal
+    (access kept until the end date).
+  - Conflict rules written in README ("Commercial rules").
+
+M5 - Usage quotas (2026-11-14)
+  - Demo feature: "AI summary" button on a course (no real AI is called).
+  - Daily credits (reset 00:00 UTC):
+      bought / granted course .... 5 per user
+      All-Access pass ............ 20 per user
+      organization seat .......... 10 per seat, shared by the whole org
+  - When credits run out: HTTP 429 + Retry-After.
+  - Many requests at once can't go over the limit (one atomic DB update).
+  - Double click / retry counted once (request id). If the summary fails,
+    the credit is given back.
+  - Tables: usage_counters, usage_events. Code: src/services/quotas.js,
+    src/routes/ai.js. Checks: npm run verify:m5.
+
+M6 - Reconciliation
+  - Runs every 15 min and from /admin/reconciliation.
+  - Auto-fixes: lost payment / refund webhooks, stuck REFUND_PENDING orders
+    (by replaying the missing event through the normal webhook path).
+  - Sends to admin: amount mismatch, unknown payment, refund not at provider,
+    failed purchase, REFUND_FAILED, DEAD webhooks. Issues close themselves
+    when the problem goes away. Running it twice changes nothing.
+
+Cleanups done
+  - .env spacing fixed.
+  - In-memory verify script (src/domain/verify.js) works again.
+  - "Add to Cart" htmx error fixed.
+
+==================================================================
+PENDING
+==================================================================
+M5 - Usage quotas
+  - Commit the M5 changes.
+
+M7 - Agent-approved purchase  [NOT STARTED, optional]
+  - purchase_intents table: the agent proposes item / merchant / amount.
+  - The user approves; approval token is signed, valid 5 min, single use.
+  - On execute, check item/merchant/amount are unchanged; reject tampered,
+    replayed, expired or cancelled approvals.
+  - The ledger must not know about the agent.
+
+M8 - Audit and failure tests  [PARTIAL]
+  Done: activity page with source/reason; verify suite; browser scripts.
+  To do:
+  - Admin trace page: order -> webhook inbox row -> ledger events -> access.
+  - Mock provider failure switches: duplicate, delay, reorder, drop, HTTP 500.
+  - One demo script: one-time purchase, subscription, seat flow, refund,
+    expiry, lost/duplicate events + reconciliation.
+
+Optional / later
+  - One real Razorpay test-mode payment + refund by hand in the browser.
+  - Test users (@test.local) stay in the append-only ledger (by design).
+  - Quota usage shown on an admin page.
+
+SUGGESTED ORDER
+  1. Commit M5   2. M8 trace page   3. M8 failure switches
+  4. M8 demo script   5. M7 (optional)

@@ -294,3 +294,39 @@ CREATE TABLE IF NOT EXISTS org_seat_pools (
 CREATE INDEX IF NOT EXISTS ix_seat_pools_org ON org_seat_pools (org_id);
 CREATE INDEX IF NOT EXISTS ix_ledger_seat_pool ON commerce_ledger ((payment_info->>'poolId'))
   WHERE event_type IN ('SEAT_ASSIGNED','SEAT_POOL_PURCHASED');
+
+-- -----------------------------------------------------------------------------
+-- 10. Usage quotas (M5)
+-- -----------------------------------------------------------------------------
+-- One counter per (scope, feature, UTC day). scope_key is 'user:<uuid>' for a personal
+-- quota or 'org:<uuid>' for a pool shared by an organization's seat holders. Units are
+-- taken with one conditional upsert (used + n <= limit), so concurrent requests can never
+-- push a counter past its limit.
+CREATE TABLE IF NOT EXISTS usage_counters (
+  scope_key    TEXT NOT NULL,
+  feature      TEXT NOT NULL,
+  period_start TIMESTAMPTZ NOT NULL,
+  used         INT NOT NULL DEFAULT 0 CHECK (used >= 0),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope_key, feature, period_start)
+);
+
+-- One row per accepted request (audit trail + idempotency). A retried request with the same
+-- request_key is answered from this row instead of being counted again. A request whose work
+-- failed afterwards is RELEASED and its units are given back to the counter.
+CREATE TABLE IF NOT EXISTS usage_events (
+  id           BIGSERIAL PRIMARY KEY,
+  request_key  TEXT NOT NULL UNIQUE,
+  scope_key    TEXT NOT NULL,
+  feature      TEXT NOT NULL,
+  period_start TIMESTAMPTZ NOT NULL,
+  user_id      UUID NOT NULL REFERENCES users(id),
+  product_id   TEXT,
+  units        INT NOT NULL CHECK (units > 0),
+  limit_value  INT NOT NULL,
+  used_after   INT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'CONSUMED' CHECK (status IN ('CONSUMED','RELEASED')),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_usage_events_scope ON usage_events (scope_key, feature, period_start);

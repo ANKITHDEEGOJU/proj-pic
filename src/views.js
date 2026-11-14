@@ -15,6 +15,12 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <html><head><meta charset="utf-8"><title>${esc(title)} · LEARNX</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<script>
+  // Quota / access refusals come back as 403, 429 or 502 with an HTML fragment to show.
+  document.addEventListener('htmx:beforeSwap', function (e) {
+    if ([403, 429, 502].includes(e.detail.xhr.status)) { e.detail.shouldSwap = true; e.detail.isError = false; }
+  });
+</script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Roboto:wght@400;500;700&display=swap');
 
@@ -244,7 +250,7 @@ ${
             : d.grantedVia === 'SEAT_ASSIGNED'
               ? '<small style="color:#2e7d32">Seat from your organization (not refundable)</small>'
               : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
-      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button>
+      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button> <button class="alt" hx-get="/courses/${s}/ai-summary" hx-target="#a-${s}">AI summary</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
     : (inCart
       ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
@@ -392,6 +398,27 @@ ${
     .join('') || '<tr><td colspan="7">No events</td></tr>'
 }</table>`;
 
+const QUOTA_KIND_LABEL = {
+  USER: 'your daily allowance',
+  SUBSCRIBER: 'your All-Access daily allowance',
+  ORG_POOL: "your organization's shared daily pool",
+};
+
+// M5: AI summary panel with the quota that applies to this user and course.
+const aiSummaryPanel = ({ slug, quota, used = 0, resetsAt, requestId, summary, error, exhausted, duplicate, denied }) => {
+  if (denied) return '<span class="err">AI summary needs access to this course.</span>';
+  const s = esc(slug);
+  const left = Math.max(0, quota.limit - used);
+  const reset = resetsAt ? new Date(resetsAt).toISOString().slice(11, 16) + ' UTC' : 'midnight UTC';
+  return `<div class="ai-summary">
+${summary ? `<p><strong>AI summary:</strong> ${esc(summary)}${duplicate ? ' <small>(repeat request, not counted again)</small>' : ''}</p>` : ''}
+${error ? `<p class="err">${esc(error)}</p>` : ''}
+${exhausted ? `<p class="err">Quota used up (${quota.limit}/${quota.limit}). Resets at ${esc(reset)}.</p>` : ''}
+<small>${used} / ${quota.limit} used today from ${esc(QUOTA_KIND_LABEL[quota.kind] || 'your quota')} · resets ${esc(reset)}</small><br>
+<button hx-post="/courses/${s}/ai-summary" hx-vals='{"requestId":"${esc(requestId)}"}' hx-target="#a-${s}" hx-disabled-elt="this"${left ? '' : ' disabled'}>Generate summary (1 credit)</button>
+</div>`;
+};
+
 const errorFragment = (msg) => `<span class="err">${esc(msg)}</span>`;
 
 module.exports = {
@@ -401,6 +428,7 @@ module.exports = {
   subscriptionCard,
   navCart,
   accessFragment,
+  aiSummaryPanel,
   activityPage,
   errorFragment,
   esc,

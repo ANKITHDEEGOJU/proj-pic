@@ -11,6 +11,7 @@ A course storefront built with Node.js, Express and PostgreSQL. Users can browse
 - Webhook handling with an inbox table for tracking deliveries, plus purchase and refund events
 - Admin panel: manage pricing rules and grant or revoke course access for users
 - Organizations with seat packs, and subscription renew / cancel
+- Usage quotas on a premium feature (sandbox "AI summary"), per user or pooled per organization
 
 ## Requirements
 
@@ -75,6 +76,30 @@ Then open http://localhost:3000/login, register an account, and visit `/courses`
 
 Settings are in `.env.example` (all optional).
 
+## Usage quotas
+
+Each course you can open has an **AI summary** button. Every click uses 1 credit. Credits reset every day at 00:00 UTC.
+
+This is a demo: no real AI is called. The summary is made from the course details.
+
+**How many credits you get per day**
+
+| How you got the course | Credits per day | Setting |
+|---|---|---|
+| Bought it, or an admin gave it to you | 5 (just for you) | `QUOTA_AI_SUMMARY_USER` |
+| All-Access pass | 20 (just for you) | `QUOTA_AI_SUMMARY_SUBSCRIBER` |
+| Seat from your organization | 10 per seat, shared by the whole organization | `QUOTA_AI_SUMMARY_PER_SEAT` |
+
+Example: an organization with 3 seats shares 30 credits a day between all its members.
+
+**What happens when**
+- **Credits run out:** you see "Quota used up" and the server answers HTTP 429 with a `Retry-After` header (seconds until the reset).
+- **Many clicks at the same time:** the limit is never crossed. The database checks and adds in one step.
+- **Double click or retry:** each button has its own request id, so the same request is counted only once.
+- **The summary fails:** the credit is given back. To test this, set `AI_SUMMARY_FAIL_RATE` (0 = never fail, 1 = always fail).
+
+Credits are stored in `usage_counters` (one row per user or organization, per day). Every accepted request is logged in `usage_events`.
+
 ## Project structure
 
 ```
@@ -84,12 +109,12 @@ src/server.js        App entry point
 src/routes/          HTTP routes (auth, courses, cart, checkout, admin, webhooks)
 src/domain/          Commerce ledger, projection and catalog logic
 src/payment/         Payment adapters (mock, Razorpay) and webhook processing
-src/services/        Cart and pricing engine
+src/services/        Cart, pricing, seats, subscriptions and usage quotas
 src/views.js         HTML templates
 ```
 
 ## Verification
 
 ```bash
-npm run verify       # ledger, webhook retry / reconciliation and M4 (seats, subscriptions) checks against Postgres
+npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions) and M5 (quotas) checks against Postgres
 ```
