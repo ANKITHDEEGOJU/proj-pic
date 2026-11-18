@@ -64,7 +64,15 @@ class Reconciler {
     try {
       for (const name of this.providers) {
         const adapter = this.adapters[name];
-        if (adapter.supportsReconciliation) await this.#reconcileProvider(adapter, ctx);
+        if (!adapter.supportsReconciliation) continue;
+        try {
+          await this.#reconcileProvider(adapter, ctx);
+        } catch (e) {
+          // One provider being unreachable must not stop the other providers' checks.
+          ctx.checked[name] = { error: e.message || String(e) };
+          error = [error, `${name}: ${e.message || e}`].filter(Boolean).join('; ');
+          this.log.error?.(`[recon] provider ${name} failed:`, e.message || e);
+        }
       }
       await this.#stuckRefundPending(ctx);
       await this.#databaseChecks(ctx);

@@ -61,6 +61,19 @@ class PaymentProviderAdapter {
     throw new Error("not implemented");
   }
 
+  // ---- M7 direct charge (optional) ----------------------------------------------------
+  // Providers that can charge an already-authorized payment from the server, without the
+  // customer on a checkout page, return true and implement charge(). Others fall back to
+  // their normal checkout redirect.
+  get supportsDirectCharge() {
+    return false;
+  }
+
+  /** Charges a payment created by createPayment(). Resolves when the provider accepted it. */
+  async charge({ providerPaymentId, orderRef, userId, productId, amount, currency }) {
+    throw new Error("not implemented");
+  }
+
   // ---- M6 reconciliation (optional) -------------------------------------------------
   // Adapters that can be asked "what really happened?" return true and implement the
   // methods below. Others only get the provider-independent (database) checks.

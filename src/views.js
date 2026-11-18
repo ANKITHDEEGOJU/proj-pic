@@ -182,7 +182,7 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <nav>
 <span>
 <strong style="font-family: 'monospace';"><i>LearnX</i></strong>
-${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
+${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a><a href="/agent">Agent</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
 ${user ? `<span>${esc(user.email)} <button hx-post="/logout">Logout</button></span>` : ''}
 </nav>
 ${body}</body></html>`;
@@ -250,7 +250,7 @@ ${
             : d.grantedVia === 'SEAT_ASSIGNED'
               ? '<small style="color:#2e7d32">Seat from your organization (not refundable)</small>'
               : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
-      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}">Access</button> <button class="alt" hx-get="/courses/${s}/ai-summary" hx-target="#a-${s}">AI summary</button>
+      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}" hx-swap="innerHTML">Access</button> <button class="alt" hx-get="/courses/${s}/ai-summary" hx-target="#a-${s}" hx-swap="innerHTML">AI summary</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
     : (inCart
       ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
@@ -415,7 +415,7 @@ ${summary ? `<p><strong>AI summary:</strong> ${esc(summary)}${duplicate ? ' <sma
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 ${exhausted ? `<p class="err">Quota used up (${quota.limit}/${quota.limit}). Resets at ${esc(reset)}.</p>` : ''}
 <small>${used} / ${quota.limit} used today from ${esc(QUOTA_KIND_LABEL[quota.kind] || 'your quota')} · resets ${esc(reset)}</small><br>
-<button hx-post="/courses/${s}/ai-summary" hx-vals='{"requestId":"${esc(requestId)}"}' hx-target="#a-${s}" hx-disabled-elt="this"${left ? '' : ' disabled'}>Generate summary (1 credit)</button>
+<button hx-post="/courses/${s}/ai-summary" hx-vals='{"requestId":"${esc(requestId)}"}' hx-target="#a-${s}" hx-swap="innerHTML" hx-disabled-elt="this"${left ? '' : ' disabled'}>Generate summary (1 credit)</button>
 </div>`;
 };
 

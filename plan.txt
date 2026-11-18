@@ -23,9 +23,9 @@ M1 Transaction model ............ DONE
 M2 Adapter + idempotency ........ DONE
 M3 Entitlement ledger ........... DONE
 M4 Commercial rules ............. DONE
-M5 Usage quotas ................. DONE (not committed yet)
+M5 Usage quotas ................. DONE
 M6 Refund + reconciliation ...... DONE
-M7 Agent-approved purchase ...... NOT STARTED (optional)
+M7 Agent-approved purchase ...... DONE (simulated agent; not committed yet)
 M8 Audit + failure tests ........ PARTIAL
 
 Run all checks: npm run verify
@@ -94,6 +94,29 @@ M6 - Reconciliation
     failed purchase, REFUND_FAILED, DEAD webhooks. Issues close themselves
     when the problem goes away. Running it twice changes nothing.
 
+M8 - Failure switches on the mock provider (2026-11-14, not committed yet)
+  - Switch on the mock /admin page: duplicate, delay, reorder, drop,
+    refund API 500 (for the next N calls, or until turned off).
+  - Mock now keeps its own payments/refunds (mock-provider/data.json) and
+    serves them at /api/*, so reconciliation also repairs mock payments.
+  - Mock re-sends a webhook that got 5xx / no answer (5s, 15s, 45s).
+  - "Refund at provider" and "Release held webhook" buttons on mock /admin.
+  - Reconciliation: one provider being down no longer stops the others.
+  - Check: npm run verify:failures (both servers running).
+
+M7 - Agent-approved purchase (2026-11-15, not committed yet)
+  - "Agent" page: a Simulated agent proposes a course; the server sets item,
+    merchant (LEARNX) and price from the catalog.
+  - User approves on a review page -> signed token (JWT, own key), 5 min,
+    one-time nonce. Rejected: tampered, other key, other user/intent,
+    changed amount, price changed, cancelled, expired, replayed (also when
+    sent 3 times at once: exactly one wins).
+  - Mock: server-to-server charge (/api/charge), agent finishes alone.
+    Razorpay test mode: redirected to checkout for the approved amount.
+  - Ledger untouched: purchase arrives via the normal webhook; only link is
+    purchase_intents.order_id. JSON API for a real agent: /agent/api/*.
+  - Checks: npm run verify:m7.
+
 Cleanups done
   - .env spacing fixed.
   - In-memory verify script (src/domain/verify.js) works again.
@@ -102,29 +125,32 @@ Cleanups done
 ==================================================================
 PENDING
 ==================================================================
-M5 - Usage quotas
-  - Commit the M5 changes.
-
-M7 - Agent-approved purchase  [NOT STARTED, optional]
-  - purchase_intents table: the agent proposes item / merchant / amount.
-  - The user approves; approval token is signed, valid 5 min, single use.
-  - On execute, check item/merchant/amount are unchanged; reject tampered,
-    replayed, expired or cancelled approvals.
-  - The ledger must not know about the agent.
+M7 - Agent-approved purchase  [DONE with simulated agent]
+  - Commit M7.
+  - Optional later: a real AI agent (Claude, claude-opus-5-5, via
+    @anthropic-ai/sdk tool use) calling /agent/api/*, with its own
+    credential that can propose/execute but not approve.
+  - Optional later: Razorpay recurring tokens so the agent can pay alone.
 
 M8 - Audit and failure tests  [PARTIAL]
-  Done: activity page with source/reason; verify suite; browser scripts.
+  Done: activity page with source/reason; verify suite; failure switches.
+  Dropped: admin trace page (history already visible in /activity and
+  /admin/reconciliation).
   To do:
-  - Admin trace page: order -> webhook inbox row -> ledger events -> access.
-  - Mock provider failure switches: duplicate, delay, reorder, drop, HTTP 500.
-  - One demo script: one-time purchase, subscription, seat flow, refund,
-    expiry, lost/duplicate events + reconciliation.
+  - Commit the failure switch changes.
+  - Browser walkthrough: DONE (README "Demo walkthrough", 8 steps).
+  - Way to show expiry in the walkthrough without waiting 30 days
+    (e.g. SUB_DURATION_MINUTES for a short demo pass).
 
 Optional / later
   - One real Razorpay test-mode payment + refund by hand in the browser.
   - Test users (@test.local) stay in the append-only ledger (by design).
   - Quota usage shown on an admin page.
+  - Old mock payments (made before the mock kept records) show as
+    LEDGER_PAYMENT_NOT_AT_PROVIDER in reconciliation; they drop out of the
+    7-day window on their own.
 
 SUGGESTED ORDER
-  1. Commit M5   2. M8 trace page   3. M8 failure switches
-  4. M8 demo script   5. M7 (optional)
+  1. Commit failure switches + M7
+  2. Short demo pass (expiry in the walkthrough)
+  3. Optional: real AI agent

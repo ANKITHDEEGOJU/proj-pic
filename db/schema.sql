@@ -330,3 +330,83 @@ CREATE TABLE IF NOT EXISTS usage_events (
   released_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS ix_usage_events_scope ON usage_events (scope_key, feature, period_start);
+
+-- -----------------------------------------------------------------------------
+-- 11. Agent-approved purchases (M7)
+-- -----------------------------------------------------------------------------
+-- An agent proposes a purchase; only the user can approve it. Approval issues a signed,
+-- short-lived token carrying a one-time nonce; executing checks the token against this row
+-- and flips APPROVED -> EXECUTED exactly once. Payment then runs through the normal order /
+-- webhook flow, so the ledger never sees anything agent-specific (order_id is the only link).
+CREATE TABLE IF NOT EXISTS purchase_intents (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES users(id),
+  agent_name   TEXT NOT NULL,
+  item_type    TEXT NOT NULL DEFAULT 'COURSE' CHECK (item_type = 'COURSE'),
+  item_id      TEXT NOT NULL,
+  merchant     TEXT NOT NULL,
+  amount_cents INT  NOT NULL CHECK (amount_cents > 0),
+  currency     TEXT NOT NULL,
+  provider     TEXT NOT NULL CHECK (provider IN ('mock','razorpay')),
+  status       TEXT NOT NULL DEFAULT 'PROPOSED'
+               CHECK (status IN ('PROPOSED','APPROVED','EXECUTED','CANCELLED','FAILED')),
+  nonce        TEXT,
+  approved_at  TIMESTAMPTZ,
+  expires_at   TIMESTAMPTZ,
+  executed_at  TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  order_id     UUID REFERENCES orders(id),
+  failure_reason TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_purchase_intents_user ON purchase_intents (user_id, created_at DESC);
+
+-- M7 hardening -----------------------------------------------------------------------------
+-- Agent keys: an agent's own credential (Authorization: Bearer lx_agent_...). Only the hash
+-- is stored. Scopes are a subset of propose / read / execute: there is no scope (and no API
+-- route) that can approve, so an agent can never approve its own request.
+CREATE TABLE IF NOT EXISTS agent_keys (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES users(id),
+  name         TEXT NOT NULL,
+  key_prefix   TEXT NOT NULL,
+  key_hash     TEXT NOT NULL UNIQUE,
+  scopes       TEXT[] NOT NULL DEFAULT '{propose,read,execute}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ,
+  revoked_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_agent_keys_user ON agent_keys (user_id);
+
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS agent_key_id    UUID REFERENCES agent_keys(id);
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS token_issued_at TIMESTAMPTZ; -- API agent picked up its token (once)
+ALTER TABLE purchase_intents DROP CONSTRAINT IF EXISTS purchase_intents_status_check;
+ALTER TABLE purchase_intents ADD  CONSTRAINT purchase_intents_status_check
+  CHECK (status IN ('PROPOSED','APPROVED','EXECUTED','CANCELLED','FAILED','EXPIRED'));
+
+-- Close stale / duplicate open requests before the one-open-request-per-course rule below.
+UPDATE purchase_intents SET status='EXPIRED'
+ WHERE (status='APPROVED' AND expires_at <= now())
+    OR (status='PROPOSED' AND created_at <= now() - interval '24 hours');
+UPDATE purchase_intents SET status='CANCELLED', cancelled_at=now()
+ WHERE id IN (SELECT id FROM (
+         SELECT id, row_number() OVER (PARTITION BY user_id, item_id ORDER BY created_at DESC) AS rn
+           FROM purchase_intents WHERE status IN ('PROPOSED','APPROVED')) d WHERE rn > 1);
+-- At most one open request per user and course (also under concurrent proposals).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_intents_open
+  ON purchase_intents (user_id, item_id) WHERE status IN ('PROPOSED','APPROVED');
+
+-- Every step of a request, including rejected attempts (audit trail for M7 / M8).
+-- intent_ref is text, not a foreign key: rejected calls may name an id that does not exist.
+CREATE TABLE IF NOT EXISTS intent_events (
+  id          BIGSERIAL PRIMARY KEY,
+  intent_ref  TEXT NOT NULL,
+  user_id     UUID,          -- caller (user or the user behind an agent key)
+  actor       TEXT NOT NULL, -- 'user', 'agent:<name>', 'system'
+  event       TEXT NOT NULL, -- PROPOSED, APPROVED, APPROVE_DENIED, CANCELLED, TOKEN_ISSUED, EXECUTED, REJECTED, FAILED, EXPIRED
+  code        TEXT,          -- rejection / failure code
+  detail      TEXT,
+  ip          TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_intent_events_ref ON intent_events (intent_ref, id);

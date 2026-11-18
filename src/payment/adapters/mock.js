@@ -142,16 +142,111 @@ async refund({ providerPaymentId, amount, currency, userId, productId, orderId }
     pay.providerRefundId = providerRefundId;
     return { providerRefundId };
   }
+  // ---- M7: server-to-server charge (sandbox only) ---------------------------------------
+  get supportsDirectCharge() { return true; }
+
+  async charge({ providerPaymentId, orderRef, userId, productId, amount, currency }) {
+    const base = process.env.MOCK_PROVIDER_URL || 'http://localhost:3001';
+    let r;
+    try {
+      r = await fetch(`${base}/api/charge/${encodeURIComponent(providerPaymentId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET },
+        body: JSON.stringify({ orderRef, userId, productId, amount, currency }),
+      });
+    } catch (err) {
+      throw new Error(`mock provider unreachable (${err.cause?.code || err.message})`);
+    }
+    if (!r.ok) throw new Error(`mock provider returned HTTP ${r.status}`);
+    const pay = payments.get(providerPaymentId);
+    if (pay) pay.status = 'PAID';
+    return r.json();
+  }
+
+  // ---- M6 reconciliation: ask the mock provider what really happened ------------------
+  get supportsReconciliation() { return true; }
+
+  async #api(path) {
+    const base = process.env.MOCK_PROVIDER_URL || 'http://localhost:3001';
+    let r;
+    try {
+      r = await fetch(`${base}/api${path}`, { headers: { 'x-mock-secret': MOCK_SECRET } });
+    } catch (err) {
+      throw new Error(`mock provider unreachable (${err.cause?.code || err.message})`);
+    }
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`mock provider returned HTTP ${r.status}`);
+    return r.json();
+  }
+
+  #toTxn(p) {
+    const minor = (x) => Math.round(Number(x || 0) * 100);
+    return {
+      providerPaymentId: p.id,
+      amountMinor: minor(p.amount),
+      currency: p.currency || 'USD',
+      status: p.status, // paid | failed | refunded
+      paid: p.status === 'paid' || p.status === 'refunded',
+      amountRefundedMinor: (p.refunds || []).reduce((sum, r) => sum + minor(r.amount), 0),
+      orderRef: p.orderRef || null,
+      occurredAt: p.createdAt,
+      userId: p.userId,
+      productId: p.productId,
+    };
+  }
+
+  #toRefund(r, paymentId) {
+    return {
+      providerRefundId: r.id,
+      providerPaymentId: paymentId,
+      amountMinor: Math.round(Number(r.amount) * 100),
+      status: r.status,
+      raw: { created_at: Math.floor(new Date(r.createdAt).getTime() / 1000) },
+    };
+  }
+
   async listTransactions({ since }) {
-    return [...payments.entries()]
-      .filter(([, p]) => new Date(p.createdAt) >= new Date(since))
-      .map(([id, p]) => ({ 
-        providerPaymentId: id, 
-        amount: p.amount, 
-        currency: p.currency, 
-        status: p.status, 
-        occurredAt: p.createdAt 
-      }));
+    const list = await this.#api(`/payments?since=${encodeURIComponent(new Date(since).toISOString())}`);
+    return (list || []).map((p) => this.#toTxn(p));
+  }
+
+  async fetchPayment(providerPaymentId) {
+    const p = await this.#api(`/payments/${encodeURIComponent(String(providerPaymentId).replace(/^mock:/, ''))}`);
+    return p ? this.#toTxn(p) : null;
+  }
+
+  async listRefunds({ since }) {
+    const list = await this.#api(`/refunds?since=${encodeURIComponent(new Date(since).toISOString())}`);
+    return (list || []).map((r) => this.#toRefund(r, r.paymentId));
+  }
+
+  async fetchRefunds(providerPaymentId) {
+    const p = await this.#api(`/payments/${encodeURIComponent(String(providerPaymentId).replace(/^mock:/, ''))}`);
+    return p ? p.refunds.map((r) => this.#toRefund(r, p.id)) : [];
+  }
+
+  // The webhook the mock provider would have sent, for replaying a lost one.
+  recoveryEvent(kind, txn, refund = null) {
+    const common = {
+      providerPaymentId: txn.providerPaymentId,
+      userId: txn.userId,
+      productId: txn.productId,
+      currency: txn.currency,
+      orderRef: txn.orderRef || undefined,
+    };
+    if (kind === 'purchase') {
+      return {
+        eventKey: `payment.succeeded:${txn.providerPaymentId}`,
+        payload: { ...common, eventType: 'payment.succeeded', amount: txn.amountMinor / 100, occurredAt: txn.occurredAt },
+      };
+    }
+    return {
+      eventKey: `refund.succeeded:${refund.providerRefundId}`,
+      payload: {
+        ...common, eventType: 'refund.succeeded', providerRefundId: refund.providerRefundId,
+        amount: refund.amountMinor / 100, occurredAt: new Date(refund.raw.created_at * 1000).toISOString(),
+      },
+    };
   }
 }
 

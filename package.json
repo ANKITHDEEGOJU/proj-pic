@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "scripts": {
     "start": "node src/server.js",
-    "verify": "node src/domain/verify.js && node src/domain/verify-pg.js && node src/payment/verify-m2-m6.js && node src/services/verify-m4.js && node src/services/verify-m5.js",
+    "verify": "node src/domain/verify.js && node src/domain/verify-pg.js && node src/payment/verify-m2-m6.js && node src/services/verify-m4.js && node src/services/verify-m5.js && node src/services/verify-m7.js",
     "db:init": "dotenv -- sh -c 'psql \"$DATABASE_URL\" -f db/schema.sql' ",
     "verify:m2m6": "node src/payment/verify-m2-m6.js",
     "verify:m4": "node src/services/verify-m4.js",
     "verify:m5": "node src/services/verify-m5.js",
-    "verify:memory": "node src/domain/verify.js"
+    "verify:m7": "node src/services/verify-m7.js",
+    "verify:memory": "node src/domain/verify.js",
+    "verify:failures": "node mock-provider/verify-failure-switches.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

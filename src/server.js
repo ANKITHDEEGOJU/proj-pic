@@ -46,6 +46,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   app.use(require("./routes/subscription")); // M4: renew / cancel renewal
   app.use(require("./routes/org"));          // M4: organizations and seat packs
   app.use(require("./routes/ai"));           // M5: quota-limited AI summary
+  app.use(require("./routes/agent"));        // M7: agent-approved purchases
   const port = 3000;
 
   app.use((err, req, res, _next) => {
