@@ -320,7 +320,9 @@ const withEnv = async (vars, fn) => {
     }
     assert.equal((await call("POST", `/agent/intents/${id}/approve`, { cookie, form: {} })).status, 403);
     assert.equal((await agent.getIntent(id)).status, "PROPOSED", "not approved without the password");
-    const ok2 = await call("POST", `/agent/intents/${id}/approve`, { cookie, form: { password: testPassword } });
+    const outdated = await call("POST", `/agent/intents/${id}/approve`, { cookie, form: { password: testPassword } });
+    assert.match(outdated.text, /out of date/, "an Approve form without the shown amount is refused");
+    const ok2 = await call("POST", `/agent/intents/${id}/approve`, { cookie, form: { password: testPassword, amount: String((await agent.getIntent(id)).amount_cents) } });
     assert.equal(ok2.status, 303);
     assert.equal(ok2.headers.get("location"), "/agent");
   });

@@ -466,7 +466,7 @@ router.post('/cart/checkout', async (req, res) => {
       await client.query('ROLLBACK').catch(() => {});
     }
     console.error('Checkout error:', err);
-    res.status(500).send(`<span style="color:#d32f2f;">Checkout error: ${esc(err.message)}</span>`);
+    res.status(500).send('<span style="color:#d32f2f;">Checkout failed. Nothing was charged. Please try again.</span>');
   } finally {
     client.release();
   }

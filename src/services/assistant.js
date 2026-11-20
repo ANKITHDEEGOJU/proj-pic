@@ -122,6 +122,7 @@ const TOOLS = [
     parameters: { type: 'object', properties: {
       productId: { type: 'string', description: 'Course id from list_courses' },
       provider: { type: 'string', enum: ['razorpay', 'mock'], description: 'Only if the user said how to pay: razorpay (Razorpay test checkout) or mock (the mock provider\'s checkout page). Otherwise leave it out: the user chooses on the card.' },
+      couponCode: { type: 'string', description: 'Only a coupon code the user typed in this conversation. Never guess or invent one. The app checks it; an invalid code is refused with the reason.' },
     }, required: ['productId'], additionalProperties: false } } },
   { type: 'function', function: {
     name: 'check_request',
@@ -150,6 +151,7 @@ const requestView = (catalog, i) => {
   const c = agent.findCourse(catalog, i.item_id);
   return {
     intentId: i.id, course: c?.name || i.item_id, productId: i.item_id, amount: money(i.amount_cents, i.currency),
+    ...(i.coupon_code ? { listPrice: money(i.list_amount_cents ?? i.amount_cents, i.currency), coupon: i.coupon_code, discount: money(i.discount_cents || 0, i.currency) } : {}),
     provider: i.provider, status: i.status, payment: agent.paymentState(i), failureReason: i.failure_reason || undefined,
   };
 };
@@ -178,7 +180,8 @@ async function runTool(name, args, { user, keyId, catalog, decisions, startPayme
       return (await agent.listIntents(user.id, { agentKeyId: keyId })).slice(0, 10).map((i) => requestView(catalog, i));
     case 'propose_purchase': {
       const provider = args.provider === 'mock' || args.provider === 'razorpay' ? args.provider : agent.defaultProvider();
-      const i = await agent.propose({ userId: user.id, productId: String(args.productId || ''), provider,
+      const couponCode = typeof args.couponCode === 'string' && args.couponCode.trim() ? args.couponCode.trim().slice(0, 40) : null;
+      const i = await agent.propose({ userId: user.id, productId: String(args.productId || ''), provider, couponCode,
         agentName: AGENT_NAME, agentKeyId: keyId, catalog, decisions, ctx });
       // card: the page shows this request as a card with Approve / Cancel buttons.
       return { ...requestView(catalog, await agent.getIntent(i.id)), card: true,
@@ -212,6 +215,8 @@ You act for the signed-in user (${user.email}) and can look up courses and buy t
 
 How buying works:
 1. propose_purchase creates a purchase request at the catalog price. You cannot set or change prices.
+   If the user gives a coupon code, pass it as couponCode; never make one up. The app checks it and the card shows the
+   discounted price. If it is refused, tell the user the reason; they can also enter a coupon on the card before approving.
 2. The app shows the request to the user as a card with an Approve button. Only the user can approve; you have no way to.
    Clicking Approve sends you "I approved purchase request <id>" automatically, so never ask the user to tell you they approved.
 3. When the user has approved (they say so, or a message says "I approved purchase request <id>"), call execute_purchase with that id.
@@ -244,6 +249,7 @@ function outcomeLine(i, name) {
   if (['COMPLETED', 'REFUND_PENDING', 'REFUNDED', 'REFUND_FAILED', 'CHARGED_BACK'].includes(os)) return ['ok', `Payment received: ${name} is now in your library.`];
   if (os === 'FAILED') return ['err', `Payment for ${name} failed. Nothing was charged.`];
   if (os === 'CANCELLED') return ['err', `Payment for ${name} was cancelled at checkout. Nothing was charged.`];
+  if (os === 'UNDERPAID') return ['err', `The payment for ${name} did not match the price, so the course was not unlocked. The support team will review it.`];
   if (os === 'EXPIRED' || (i.status === 'FAILED' && os === 'PENDING')) return ['err', `${name} was not paid in time. Nothing was charged.`];
   if (i.status === 'CANCELLED') return ['msg', `Purchase request for ${name} cancelled.`];
   if (i.status === 'EXPIRED') return ['msg', `Purchase request for ${name} expired: it was not approved in time.`];

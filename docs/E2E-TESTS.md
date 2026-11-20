@@ -249,3 +249,76 @@ new code; stopped afterwards.
 D18: seat packs whose checkout was cancelled stayed on `/org` as "Waiting for payment … paid
 $100.00 USD". Now one muted line "Payment cancelled. Nothing was charged." (also failed / not paid
 in time); unpaid packs show "price" instead of "paid". Covered in `verify-idempotency`.
+
+## 12. Course guides: paid content (browser, 2026-11-20)
+
+My app instance on localhost:3000 with the test account as admin, the local mock and
+`SUB_DURATION_MINUTES=2` (all on the command line); stopped afterwards.
+
+| # | Check | Result |
+|---|---|---|
+| G1 | Before publishing: no guide on any course card, `/courses/intro-to-sql/doc` -> 404 | PASS |
+| G2 | **Admin → Course content**: 3 courses with their files (`content/*.md`, 4–6 KB); **Add to course** for all three -> Published, by and when shown | PASS |
+| G3 | No access: Event Sourcing 101 guide -> "Your purchase of this course was refunded, so its guide is closed." (403, PURCHASE_REFUNDED); cards say "Includes the course guide (opens once you have access)" | PASS |
+| G4 | Buy Intro to SQL (mock) -> card shows **Open guide**; guide opens "through your purchase", headings, code blocks and bold render correctly | PASS |
+| G5 | Guide open in tab 1, **Refund** in tab 2 -> within 30 s tab 1 shows "…refunded, so its guide is closed." | PASS |
+| G6 | Buy the pass (2 min) -> Payments in Depth guide opens "through your All-Access Pass (until 4:51:41 PM)"; page left open -> at 4:52:19 it shows "Your All-Access Pass has ended…" (SUBSCRIPTION_EXPIRED) | PASS |
+| G7 | `npm run verify:content`: learner can't publish or open the admin page; 3 adds at once -> one ADDED; changed file -> UPDATED; escaped content; refund / pass end -> 403; remove -> 404 for owners too; history append-only | PASS |
+
+D19: the Course content table squeezed the Status column at ~740 px; the buttons are now stacked.
+D20: bold text in a guide broke onto its own line (the app's `.card strong` is `display:block`);
+guides override it.
+
+## 13. Security test of the course guides (2026-11-20)
+
+Attack script against localhost:3000 (fresh test accounts), plus the findings of an independent
+read-only security review, each verified live.
+
+| # | Attack | Before | After |
+|---|---|---|---|
+| S1 | No login / logged in without access / HEAD | blocked (302 / 403) | blocked |
+| S2 | Token with `alg: none`, token signed with a guessed key, payload edited to the admin email | blocked (302) | blocked |
+| S3 | 12 path tricks (case, trailing slash, `%2f`, `..`, `%00`, `;x`, `//`, `/content/*.md`, subscription id) | blocked (403/404) | blocked |
+| S4 | Learner on `/admin/content` and add / remove | blocked (302) | blocked |
+| S5 | Guide text on other pages (`/courses`, `/activity`, `/agent`, `/cart`, access, card) | not present | not present |
+| S6 | Mock webhook without the secret | 401 | 401 |
+| S7 | **Pay 0.01 instead of 50.00** (edit the amount on the mock checkout form) | **guide opened, ledger said 50.00** | order `UNDERPAID`, 403 |
+| S8 | **`POST /api/dev/events` PURCHASE_SUCCEEDED** as a normal user | **guide opened** | 404 (needs `ENABLE_DEV_EVENTS=1` + admin) |
+| S9 | **Mock webhook signed with the public example secret**, no order, any product | **guide opened** | `NO_MATCHING_ORDER`, nothing granted |
+| S10 | **Admin session signed with the public example `JWT_SECRET`** | **admin pages open** | still open until the secret is changed (startup warning added) |
+| S11 | `POST /org/pools/not-a-uuid/assign` | **server crashed** | 404, server up |
+| S12 | Guide response cacheable after refund | no `Cache-Control` | `no-store, private` |
+
+Ledger rows from S7–S9 (before the fixes) belong to `atk*_…@test.local` accounts.
+
+## 14. Coupons on agent purchases (browser, 2026-11-20)
+
+My app instance with a copy of the new mock (port 3011, new `MOCK_WEBHOOK_SECRET`), real Groq
+model, test account. After the secret rotation the old browser session was rejected (sent to
+login), as expected.
+
+| # | Check | Result |
+|---|---|---|
+| K1 | Chat "Buy Intro to SQL with coupon code DEMO" -> card ~~20.00 USD~~ 19.00 USD (coupon DEMO), Remove, Approve 19.00 USD | PASS |
+| K2 | **Remove** -> 20.00 USD and the coupon field; `NOTREAL` -> "Invalid coupon code", price unchanged | PASS |
+| K3 | `demo` (lowercase) -> 19.00 again; choose Mock, **Approve 19.00 USD** -> Pay 19.00 USD with Mock provider -> paid -> "Payment received" | PASS |
+| K4 | Order: subtotal 2000, discount 100, final 1900, rule set; line paid 1900; ledger PURCHASE_SUCCEEDED 19.00; not flagged as underpaid | PASS |
+| K5 | Request history: PROPOSED (list 2000, coupon DEMO -100), COUPON_REMOVED, COUPON_REJECTED (NOTREAL), COUPON_APPLIED, PROVIDER_CHANGED, APPROVED, TOKEN_ISSUED, EXECUTED | PASS |
+| K6 | `npm run verify:coupons` (unknown / expired / disabled / not yet active / other course / pass-only / not eligible / free / bad characters; owner-only apply; stale card; token pins coupon; coupon disabled or changed after approval; assistant passes only the user's code) | PASS |
+| K7 | `npm run verify:security` (login / register / step-up limits, forged sessions, dev route, error text, malformed ids) | PASS |
+
+## 15. Independent review of all changes, fixes and re-test (2026-11-20)
+
+| # | Finding (reviewer) | Fix | Test |
+|---|---|---|---|
+| R1 | Unset `MOCK_WEBHOOK_SECRET` fell back to a secret written in the source | no fallback: all mock webhooks rejected, startup warning, constant-time compare | verify-security |
+| R2 | Underpayment check ignored currency (50.00 JPY for 50.00 USD passed) | amount and currency must match the order | verify-m4 (+ full payment afterwards completes) |
+| R3 | Parallel password guesses slipped past the limits (counted after bcrypt) | counted before the check, cleared on success | verify-security (10 parallel -> at most 3 checked; step-up 8 parallel) |
+| R4 | Behind ngrok all visitors share 127.0.0.1; anyone could lock a known email | trust proxy `loopback`; per email+IP limit + higher per-email cap | verify-security (X-Forwarded-For) |
+| R5 | Step-up race: remove a coupon while approving without password | Approve requires the shown amount; password threshold re-checked in the UPDATE | verify-agent-coupons (STEP_UP_REQUIRED) |
+| R6 | `ADMIN_EMAIL` could be registered if the account didn't exist | reserved (ADMIN_ALLOW_REGISTER=1 for first setup) | verify-security |
+| R7–R10 | Admin "View" gave 403; guide title on 403; `NEW.YEAR` codes refused; UNDERPAID agent card stuck | admin preview; course name only; printable codes; finished card with message | verify-content, verify-agent-coupons |
+
+Live re-run after the fixes (new secrets, mock copy with the new secret): 30 guide attacks, 0 leaks
+(including paying 0.01); `/api/dev/events` 404; webhook and admin session forged with the old
+example secrets rejected (401 / 302). `npm run verify`: 11 suites pass.

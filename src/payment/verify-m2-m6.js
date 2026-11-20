@@ -277,8 +277,12 @@ registry[PROVIDER] = fake; // so the retry worker can resolve inbox rows of this
   assert.deepEqual(await issuesFor(Kr.id, "AUTO_FIXED"), ["MISSING_REFUND"], "old payment refunded inside the window");
   assert.equal(await orderStatus(K.orderId), "REFUNDED");
 
-  assert.deepEqual(await issuesFor(C.pay.id), ["AMOUNT_MISMATCH"]);
-  assert.deepEqual(await issuesFor(C.pay.id, "AUTO_FIXED"), ["MISSING_PURCHASE"]);
+  // C paid 54.00 for a 55.00 order: the replay is refused (no access for less than the order
+  // costs) and both the mismatch and the refusal are escalated, nothing counted as fixed.
+  assert.deepEqual((await issuesFor(C.pay.id)).sort(), ["AMOUNT_MISMATCH", "PAYMENT_REFUSED"]);
+  assert.deepEqual(await issuesFor(C.pay.id, "AUTO_FIXED"), []);
+  assert.equal(await orderStatus(C.orderId), "UNDERPAID");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE payment_info->>'providerPaymentId'=$1", [C.pay.id])).rows[0].n, 0, "nothing granted for an underpayment");
 
   assert.equal(await orderStatus(D.orderId), "COMPLETED", "stuck pending with no provider refund is reopened");
   assert.equal(run1.fixed.filter((f) => f.kind === "STUCK_REFUND_REOPENED" && f.orderId === D.orderId).length, 1);
@@ -292,7 +296,7 @@ registry[PROVIDER] = fake; // so the retry worker can resolve inbox rows of this
   assert.deepEqual(await issuesFor(I.orderId), ["REFUND_FAILED"]);
   assert.deepEqual(await issuesFor(String(globalThis.deadRowId)), ["WEBHOOK_DEAD"]);
   console.log("[ok] M6 lost payment + lost refund webhooks replayed (even with a stale payment list, and for old payments refunded in the window); stuck REFUND_PENDING finalized / reopened");
-  console.log("[ok] M6 amount mismatch, failed-at-provider purchase, refund-not-at-provider, unknown payment, REFUND_FAILED, DEAD webhook escalated");
+  console.log("[ok] M6 amount mismatch (underpaid: refused + escalated, not granted), failed-at-provider purchase, refund-not-at-provider, unknown payment, REFUND_FAILED, DEAD webhook escalated");
 
   // The real (late) webhook after a replay is a duplicate.
   const late = await processor.process(await inbox(refunded(B.pay, Br), `refund.created:${Br.id}`), fake);

@@ -96,6 +96,7 @@ async function listIntents(userId, { agentKeyId = null } = {}) {
 const ORDER_TO_PAYMENT = {
   PENDING: 'PENDING', COMPLETED: 'PAID', REFUND_PENDING: 'REFUND_PENDING', REFUNDED: 'REFUNDED',
   REFUND_FAILED: 'REFUND_FAILED', CHARGED_BACK: 'CHARGED_BACK', FAILED: 'FAILED', EXPIRED: 'UNPAID', CANCELLED: 'CANCELLED',
+  UNDERPAID: 'UNDERPAID',
 };
 function paymentState(i) {
   if (!i.order_id) return null;
@@ -147,9 +148,29 @@ async function sweep({ userId = null } = {}) {
   return { expired: expired.length, unpaid: unpaid.length, late: late.length };
 }
 
+// ---- price and coupon -----------------------------------------------------------------------
+// The price of one course for this user, with an optional coupon, by the same rules as the cart
+// (pricingEngine.validateCoupon, the course as a one-item cart). Throws BAD_COUPON with the reason.
+// A coupon that makes the course free is refused: a purchase request needs an amount above 0.
+async function quote({ userId, course, couponCode }) {
+  const listCents = course.priceCents;
+  const code = String(couponCode ?? '').trim();
+  if (!code) return { listCents, discountCents: 0, finalCents: listCents, code: null, ruleId: null };
+  if (code.length > 40 || !/^[\x21-\x7E]+$/.test(code)) throw new AgentPurchaseError('BAD_COUPON', 'That coupon code is not valid.');
+  const user = (await pool.query('SELECT id, email FROM users WHERE id = $1', [userId])).rows[0];
+  const item = { id: course.id, slug: course.slug || course.id, unit_price_cents: listCents, price: listCents / 100 };
+  const v = await require('./pricingEngine').validateCoupon(code, user, false, [item]);
+  if (!v.valid) throw new AgentPurchaseError('BAD_COUPON', v.error || 'That coupon code is not valid.');
+  const discountCents = Math.max(0, Math.min(listCents, Number(v.discountCents) || 0));
+  const finalCents = listCents - discountCents;
+  if (finalCents <= 0) throw new AgentPurchaseError('BAD_COUPON', "This coupon makes the course free, which can't be bought through the assistant.");
+  return { listCents, discountCents, finalCents, code: String(v.rule?.code || code).toUpperCase(), ruleId: v.rule?.id || null };
+}
+const priceDetail = (q, currency) => `${q.finalCents} ${currency}${q.code ? ` (list ${q.listCents}, coupon ${q.code} -${q.discountCents})` : ''}`;
+
 // ---- propose / approve / cancel ------------------------------------------------------------
 
-async function propose({ userId, productId, provider = 'mock', agentName = 'simulated-agent', agentKeyId = null, catalog, decisions, ctx = {} }) {
+async function propose({ userId, productId, provider = 'mock', couponCode = null, agentName = 'simulated-agent', agentKeyId = null, catalog, decisions, ctx = {} }) {
   ctx = { actor: `agent:${agentName}`, ...ctx };
   const reject = async (code, message, info) => {
     await logEvent('-', 'REJECTED', { userId, code, detail: `propose ${productId}: ${message}`, ctx });
@@ -174,6 +195,15 @@ async function propose({ userId, productId, provider = 'mock', agentName = 'simu
   )).rows[0];
   if (waiting) throw await reject('PAYMENT_PENDING', 'A purchase of this course is already waiting for payment. Pay it on its card, or wait for it to expire.');
 
+  // Price (and coupon) before the daily limit is used up: a bad coupon costs no proposal.
+  let price;
+  try {
+    price = await quote({ userId, course, couponCode });
+  } catch (e) {
+    if (e instanceof AgentPurchaseError) throw await reject(e.code, e.message);
+    throw e;
+  }
+
   // Daily proposal limit per agent key (or per user for the simulated agent), via M5 quotas.
   const requestKey = `agent-propose:${crypto.randomUUID()}`;
   const quota = { scopeKey: agentKeyId ? `agentkey:${agentKeyId}` : `user:${userId}:agent`, limit: PROPOSALS_PER_DAY() };
@@ -182,11 +212,13 @@ async function propose({ userId, productId, provider = 'mock', agentName = 'simu
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO purchase_intents (user_id, agent_name, agent_key_id, item_id, merchant, amount_cents, currency, provider)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [userId, String(agentName).slice(0, 60), agentKeyId, itemId, MERCHANT(), course.priceCents, course.currency || 'USD', provider]
+      `INSERT INTO purchase_intents (user_id, agent_name, agent_key_id, item_id, merchant, amount_cents, currency, provider,
+                                     list_amount_cents, discount_cents, coupon_code, coupon_rule_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [userId, String(agentName).slice(0, 60), agentKeyId, itemId, MERCHANT(), price.finalCents, course.currency || 'USD', provider,
+        price.listCents, price.discountCents, price.code, price.ruleId]
     );
-    await logEvent(rows[0].id, 'PROPOSED', { userId, detail: `${itemId} ${course.priceCents} ${course.currency || 'USD'} via ${provider}`, ctx });
+    await logEvent(rows[0].id, 'PROPOSED', { userId, detail: `${itemId} ${priceDetail(price, course.currency || 'USD')} via ${provider}`, ctx });
     return rows[0];
   } catch (e) {
     await quotas.release(requestKey).catch(() => {});
@@ -198,6 +230,7 @@ async function propose({ userId, productId, provider = 'mock', agentName = 'simu
 function signToken(i) {
   return jwt.sign(
     { iid: i.id, item: i.item_id, merchant: i.merchant, amount: i.amount_cents, currency: i.currency,
+      list: i.list_amount_cents ?? i.amount_cents, coupon: i.coupon_code || null,
       nonce: i.nonce, agk: i.agent_key_id || null, exp: Math.floor(new Date(i.expires_at).getTime() / 1000) },
     SECRET(),
     { subject: i.user_id, audience: AUDIENCE }
@@ -206,16 +239,33 @@ function signToken(i) {
 
 // Only the owner, only from PROPOSED. Returns { intent, token }; token is null for an API
 // agent (it collects the token itself with pickupToken, so it never passes through the browser).
-async function approve({ intentId, userId, ttlSeconds = TTL(), ctx = {} }) {
+// expectAmountCents: the amount the user saw when clicking Approve. If the price changed meanwhile
+// (a coupon applied or removed in another tab), nothing is approved: the user must see the new price.
+// noPasswordMaxCents: set when the user did not enter the step-up password; approving then requires
+// the amount to still be at or below it (checked in the same UPDATE).
+async function approve({ intentId, userId, ttlSeconds = TTL(), expectAmountCents = null, noPasswordMaxCents = null, ctx = {} }) {
   ctx = { actor: 'user', ...ctx };
   const nonce = crypto.randomBytes(16).toString('hex');
+  const expect = expectAmountCents === null || expectAmountCents === undefined || expectAmountCents === '' ? null : Number(expectAmountCents);
+  if (expect !== null && !Number.isInteger(expect)) throw new AgentPurchaseError('PRICE_CHANGED', 'The price on the card is out of date. Check the new price and approve again.');
   const { rows } = await pool.query(
     `UPDATE purchase_intents
         SET status='APPROVED', nonce=$3, approved_at=now(), expires_at=now() + make_interval(secs => $4)
-      WHERE id=$1 AND user_id=$2 AND status='PROPOSED' RETURNING *`,
-    [intentId, userId, nonce, ttlSeconds]
+      WHERE id=$1 AND user_id=$2 AND status='PROPOSED' AND ($5::int IS NULL OR amount_cents = $5)
+        AND ($6::int IS NULL OR amount_cents <= $6) RETURNING *`,
+    [intentId, userId, nonce, ttlSeconds, expect, noPasswordMaxCents]
   );
   if (!rows[0]) {
+    const cur = await getIntent(intentId);
+    if (noPasswordMaxCents !== null && cur && cur.user_id === userId && cur.status === 'PROPOSED' && cur.amount_cents > noPasswordMaxCents
+        && (expect === null || cur.amount_cents === expect)) {
+      await logEvent(intentId, 'APPROVE_DENIED', { userId, code: 'STEP_UP_REQUIRED', detail: `approve without password at ${cur.amount_cents}`, ctx });
+      throw new AgentPurchaseError('STEP_UP_REQUIRED', 'This amount needs your password. Enter it and approve again.');
+    }
+    if (expect !== null && cur && cur.user_id === userId && cur.status === 'PROPOSED' && cur.amount_cents !== expect) {
+      await logEvent(intentId, 'REJECTED', { userId, code: 'PRICE_CHANGED', detail: `approve: card showed ${expect}, price is ${cur.amount_cents}`, ctx });
+      throw new AgentPurchaseError('PRICE_CHANGED', 'The price changed (a coupon was applied or removed). Check the new price and approve again.');
+    }
     const err = await stateError(intentId, userId, 'approve');
     await logEvent(intentId, 'REJECTED', { userId, code: err.code, detail: `approve: ${err.message}`, ctx });
     throw err;
@@ -295,6 +345,33 @@ async function setProvider({ intentId, userId, provider, ctx = {} }) {
   return rows[0];
 }
 
+// The user applies (or removes, couponCode = null / '') a coupon on a request that is still waiting
+// for approval. Only the owner, only while PROPOSED. Throws BAD_COUPON (request unchanged) if invalid.
+async function setCoupon({ intentId, userId, couponCode, catalog, ctx = {} }) {
+  ctx = { actor: 'user', ...ctx };
+  const i = await getIntent(intentId);
+  if (!i || i.user_id !== userId) throw new AgentPurchaseError('NOT_FOUND', 'Purchase request not found.');
+  if (i.status !== 'PROPOSED') throw await stateError(intentId, userId, 'approve');
+  const course = findCourse(catalog, i.item_id);
+  if (!course) throw new AgentPurchaseError('UNKNOWN_ITEM', 'This course is no longer sold.');
+  let q;
+  try {
+    q = await quote({ userId, course, couponCode });
+  } catch (e) {
+    if (e instanceof AgentPurchaseError) await logEvent(intentId, 'COUPON_REJECTED', { userId, code: e.code, detail: `${String(couponCode).slice(0, 40)}: ${e.message}`, ctx });
+    throw e;
+  }
+  const { rows } = await pool.query(
+    `UPDATE purchase_intents SET amount_cents=$3, list_amount_cents=$4, discount_cents=$5, coupon_code=$6, coupon_rule_id=$7
+      WHERE id=$1 AND user_id=$2 AND status='PROPOSED' RETURNING *`,
+    [intentId, userId, q.finalCents, q.listCents, q.discountCents, q.code, q.ruleId]
+  );
+  if (!rows[0]) throw await stateError(intentId, userId, 'approve');
+  if ((i.coupon_code || null) !== q.code || i.amount_cents !== q.finalCents)
+    await logEvent(intentId, q.code ? 'COUPON_APPLIED' : 'COUPON_REMOVED', { userId, detail: priceDetail(q, i.currency), ctx });
+  return rows[0];
+}
+
 // Records a step-up (password) failure on approve.
 async function approveDenied({ intentId, userId, code, message, ctx = {} }) {
   await logEvent(intentId, 'APPROVE_DENIED', { userId, code, detail: message, ctx: { actor: 'user', ...ctx } });
@@ -318,7 +395,7 @@ async function execute({ intentId, token, userId, agentKeyId = null, catalog, de
 async function executeChecked({ intentId, token, userId, agentKeyId, catalog, decisions, startPayment, ctx }) {
   let claims;
   try {
-    claims = jwt.verify(String(token || '').trim(), SECRET(), { audience: AUDIENCE });
+    claims = jwt.verify(String(token || '').trim(), SECRET(), { audience: AUDIENCE, algorithms: ['HS256'] });
   } catch (e) {
     if (e.name === 'TokenExpiredError') throw new AgentPurchaseError('EXPIRED', 'The approval has expired. Ask the user to approve again.');
     throw new AgentPurchaseError('TAMPERED', 'The approval token is invalid or was changed.');
@@ -337,12 +414,24 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
   if (i.status === 'EXPIRED') throw new AgentPurchaseError('EXPIRED', 'The approval has expired.');
   if (i.status !== 'APPROVED') throw new AgentPurchaseError('NOT_APPROVED', 'The user has not approved this purchase.');
   if (claims.nonce !== i.nonce) throw new AgentPurchaseError('REPLAYED', 'This approval was replaced or already used.');
-  if (claims.item !== i.item_id || claims.merchant !== i.merchant || claims.amount !== i.amount_cents || claims.currency !== i.currency)
-    throw new AgentPurchaseError('MISMATCH', 'Item, merchant or amount differ from what the user approved.');
+  const listCents = i.list_amount_cents ?? i.amount_cents;
+  if (claims.item !== i.item_id || claims.merchant !== i.merchant || claims.amount !== i.amount_cents || claims.currency !== i.currency
+      || (claims.list ?? claims.amount) !== listCents || (claims.coupon ?? null) !== (i.coupon_code || null))
+    throw new AgentPurchaseError('MISMATCH', 'Item, merchant, amount or coupon differ from what the user approved.');
   if (new Date(i.expires_at) <= new Date()) throw new AgentPurchaseError('EXPIRED', 'The approval has expired.');
   const course = findCourse(catalog, i.item_id);
-  if (!course || course.priceCents !== i.amount_cents || (course.currency || 'USD') !== i.currency)
+  if (!course || course.priceCents !== listCents || (course.currency || 'USD') !== i.currency)
     throw new AgentPurchaseError('PRICE_CHANGED', 'The price changed after approval. Ask the user to approve again.');
+  // The coupon must still give exactly the approved price (it may have expired or been disabled since).
+  if (i.coupon_code) {
+    let q = null, why = null;
+    try { q = await quote({ userId: i.user_id, course, couponCode: i.coupon_code }); } catch (e) { if (!(e instanceof AgentPurchaseError)) throw e; why = e.message; }
+    if (!q || q.finalCents !== i.amount_cents) {
+      const reason = why ? `Coupon ${i.coupon_code} is no longer valid: ${why}` : `Coupon ${i.coupon_code} now gives a different price`;
+      await pool.query("UPDATE purchase_intents SET status='FAILED', failure_reason=$2 WHERE id=$1 AND status='APPROVED'", [intentId, reason]);
+      throw new AgentPurchaseError('COUPON_INVALID', `${reason}. Nothing was charged; ask the assistant to buy it again.`);
+    }
+  }
   // The user may have bought the course another way since approving: don't buy it twice.
   if (decisions?.evaluateAccess(i.user_id, i.item_id).allowed) {
     await pool.query(
@@ -364,14 +453,14 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
     );
     if (!won.rowCount) throw new AgentPurchaseError('REPLAYED', 'This approval was already used.');
     orderId = (await client.query(
-      `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, provider, status)
-       VALUES ($1,$2,0,$2,$3,'PENDING') RETURNING id`,
-      [i.user_id, i.amount_cents, i.provider]
+      `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, applied_rule_id, provider, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'PENDING') RETURNING id`,
+      [i.user_id, listCents, listCents - i.amount_cents, i.amount_cents, i.coupon_rule_id || null, i.provider]
     )).rows[0].id;
     await client.query(
       `INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents)
-       VALUES ($1,'COURSE',$2,$3,1,NULL,NULL,$3)`,
-      [orderId, i.item_id, i.amount_cents]
+       VALUES ($1,'COURSE',$2,$3,1,NULL,NULL,$4)`,
+      [orderId, i.item_id, listCents, i.amount_cents]
     );
     await client.query('UPDATE purchase_intents SET order_id=$2 WHERE id=$1', [intentId, orderId]);
     await client.query('COMMIT');
@@ -397,6 +486,6 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
 }
 
 module.exports = {
-  AgentPurchaseError, propose, approve, approveDenied, setProvider, cancelUnpaid, pickupToken, cancel, execute, sweep,
+  AgentPurchaseError, propose, approve, approveDenied, setProvider, setCoupon, quote, cancelUnpaid, pickupToken, cancel, execute, sweep,
   getIntent, listIntents, listEvents, paymentState, findCourse, defaultProvider, AUDIENCE,
 };

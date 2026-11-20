@@ -483,3 +483,43 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_scope TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_key TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_url TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_checkout_key ON orders (user_id, checkout_key) WHERE checkout_key IS NOT NULL;
+
+-- -----------------------------------------------------------------------------
+-- Course documents (2026-11-20): one guide per course, published by an admin
+-- -----------------------------------------------------------------------------
+-- The guides ship as files in content/<course id>.md; nothing is visible until an admin adds it
+-- here (Admin -> Course content). Opening a document checks access on every request through the
+-- normal access decision (purchase, pass, seat, grant), so a refund or an expired pass closes it.
+CREATE TABLE IF NOT EXISTS course_docs (
+  course_id  VARCHAR(100) PRIMARY KEY REFERENCES courses(id), -- at most one document per course
+  file_name  TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  added_by   TEXT NOT NULL,
+  added_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Every add / update / remove, kept for audit (append-only).
+CREATE TABLE IF NOT EXISTS course_doc_events (
+  id         BIGSERIAL PRIMARY KEY,
+  course_id  VARCHAR(100) NOT NULL,
+  action     TEXT NOT NULL CHECK (action IN ('ADDED','UPDATED','REMOVED')),
+  file_name  TEXT,
+  actor      TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE OR REPLACE FUNCTION course_doc_events_append_only() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'course_doc_events is append-only';
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_course_doc_events_no_mod ON course_doc_events;
+CREATE TRIGGER trg_course_doc_events_no_mod BEFORE UPDATE OR DELETE ON course_doc_events
+  FOR EACH ROW EXECUTE FUNCTION course_doc_events_append_only();
+
+-- Coupons on agent purchases (2026-11-20). amount_cents is what the user approves and pays (after
+-- the coupon); list_amount_cents is the catalog price it was computed from. The approval token pins
+-- both and the coupon; execute re-checks the coupon and never charges a different amount.
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS list_amount_cents INT CHECK (list_amount_cents > 0);
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS discount_cents INT NOT NULL DEFAULT 0 CHECK (discount_cents >= 0);
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS coupon_code TEXT;
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS coupon_rule_id UUID;

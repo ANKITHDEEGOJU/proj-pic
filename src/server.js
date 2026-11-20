@@ -9,8 +9,35 @@ const { PgLedgerStore } = require('./domain/stores/pgLedgerStore');
 
 if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
 
+// Secrets still equal to the public example values in .env.example can be used by anyone to sign
+// sessions (become admin) or forge mock payment webhooks. Warn loudly; refuse in production.
+{
+  const fs = require('fs');
+  const example = (() => { try { return fs.readFileSync(require('path').join(__dirname, '..', '.env.example'), 'utf8'); } catch { return ''; } })();
+  const exampleValue = (k) => (new RegExp(`^${k}=(.*)$`, 'm').exec(example)?.[1] || '').trim();
+  const weak = ['JWT_SECRET', 'MOCK_WEBHOOK_SECRET', 'AGENT_APPROVAL_SECRET']
+    .filter((k) => process.env[k] && (process.env[k].trim() === exampleValue(k) || process.env[k].trim().length < 16));
+  // Unset MOCK_WEBHOOK_SECRET: the mock provider's webhooks are all rejected (no built-in default).
+  if (!process.env.MOCK_WEBHOOK_SECRET) console.warn('\n[security] MOCK_WEBHOOK_SECRET is not set: every mock-provider webhook will be rejected.\n');
+  if (weak.length) {
+    const msg = `[security] ${weak.join(', ')} still use the example value from .env.example (or are shorter than 16 characters). Anyone who knows it can forge sessions or payments. Set new random values: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
+    if (process.env.NODE_ENV === 'production') throw new Error(msg);
+    console.warn('\n' + msg + '\n');
+  }
+}
+// An unexpected async error must not take the whole server down (Express 4 does not catch them).
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+
 (async () => {
   const app = express();
+  // Behind a tunnel or proxy on this machine (ngrok), every request comes from 127.0.0.1; trusting a
+  // local proxy makes req.ip the real visitor (X-Forwarded-For), so per-IP limits are per visitor.
+  // Only a proxy on this machine is trusted, so a remote client can't fake its IP with that header.
+  // TRUST_PROXY overrides it (e.g. "false", a hop count like "1", or an address list).
+  {
+    const tp = process.env.TRUST_PROXY ?? 'loopback';
+    app.set('trust proxy', tp === 'false' ? false : tp === 'true' ? true : /^\d+$/.test(tp) ? Number(tp) : tp);
+  }
     // Ledger lives in Postgres (set LEDGER_STORE=memory only for throwaway runs).
   const store = new PgLedgerStore(pool);
   const engine = createEngine({ products: await loadProducts(), store }); // catalog mirrors Postgres courses
@@ -39,6 +66,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
 });
   app.use(require("./routes/auth"));
   app.use(require("./routes/admin"));
+  app.use(require("./routes/content"));       // course guides (admin publishes, access-checked)
   app.use(require("./routes/courses"));
   app.use(require("./routes/cart"));
   app.use(require("./routes/commerce"));
@@ -49,11 +77,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   app.use(require("./routes/agent"));        // M7: agent-approved purchases
   const port = 3000;
 
-  app.use((err, req, res, _next) => {
-    console.error(err);
-    if (req.get('HX-Request')) return res.status(500).send('<span class="err">Server error. Check logs.</span>');
-    res.status(500).json({ error: err.message });
-  });
+  app.use(require('./errorHandler')); // generic message + reference; details only in the log
 
   // M2: retry webhook inbox rows that failed or were interrupted (backoff per row).
   // M6: reconcile provider state with the ledger. Both run in this process so their
@@ -71,6 +95,7 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   // Assistant log retention (ASSISTANT_LOG_DAYS, default 90; 0 keeps everything): checked hourly.
   startInterval('assistant-log-purge', 60 * 60_000, () => require('./services/assistant').purgeLog());
 
+  await require('./services/courseDocs').refresh(); // which courses have a published guide (course cards)
   app.listen(port, () => console.log("LEARNX :- " + port));
 })().catch((e) => {
   console.error(e);

@@ -22,15 +22,17 @@ router.get("/api/ledger", requireAuth, (req, res) =>
   ),
 );
 
-// DEV ONLY: simulate provider events until the real provider is integrated.
-router.post("/api/dev/events", requireAuth, (req, res) => {
-  if (process.env.NODE_ENV === "production") return res.status(404).end();
+// DEV ONLY: simulate provider events. Writing ledger events directly bypasses payment, so the
+// route exists only when ENABLE_DEV_EVENTS=1 and only for the admin (it used to let any logged-in
+// user grant themselves any course or pass).
+router.post("/api/dev/events", requireAuth, async (req, res) => {
+  if (process.env.ENABLE_DEV_EVENTS !== "1" || !req.user.isAdmin) return res.status(404).end();
   const { catalog, ledger } = req.app.locals.engine;
   const b = req.body || {};
   const product = catalog.get(b.productId);
   const quantity = b.quantity ?? 1;
   try {
-    const out = ledger.appendEvent(
+    const out = await ledger.appendEvent(
       {
         eventId: b.eventId || `evt_${randomUUID()}`,
         eventType: b.eventType,
@@ -52,7 +54,8 @@ router.post("/api/dev/events", requireAuth, (req, res) => {
   } catch (e) {
     if (e instanceof DomainError)
       return res.status(400).json({ code: e.code, message: e.message });
-    throw e;
+    console.error("[dev-events]", e);
+    res.status(500).json({ error: "could not record the event" });
   }
 });
 

@@ -31,7 +31,7 @@ M8 Audit + failure tests ........ DONE (failure switches, demo pass, E2E runs in
                                         docs/E2E-TESTS.md)
 
 Everything since commit 7dd197d is NOT committed yet (see PENDING).
-Run all checks: npm run verify   (8 suites, all pass on 2026-11-20)
+Run all checks: npm run verify   (11 suites, all pass on 2026-11-20)
 Update the database after pulling: npm run db:init (adds assistant_log, orders.refund_scope,
 orders.checkout_key / checkout_url)
 
@@ -374,3 +374,64 @@ CHANGE LOG 2026-11-20
   not "paid" (checked in verify-idempotency). Final reconciliation: 0 open issues.
   Note: .env MOCK_PROVIDER_URL (fb75 ngrok tunnel) is offline; start the app with
   MOCK_PROVIDER_URL=http://localhost:3001 or restart that tunnel.
+- 2026-11-20: Course guides (paid content). One guide per course in content/<course id>.md,
+  written for the three courses. Admin -> Course content (/admin/content): Add / Update from
+  file / Remove / View; idempotent; history in course_doc_events (append-only). Learners:
+  /courses/<course>/doc checks the normal access decision on every request (nothing stored),
+  so purchase opens it, refund / chargeback / revoke / unassigned seat / pass end closes it; an
+  open guide polls every 30 s and reloads with the reason. Safe built-in Markdown renderer.
+  New suite: npm run verify:content (temporary course + content folder). Browser-tested: publish,
+  buy -> open, refund in another tab -> open guide closed within 30 s, pass -> open, pass end ->
+  closed within 30 s. Fixed while testing: admin table too narrow at ~740 px (buttons stacked);
+  bold text broke lines in guides (global .card strong is display:block).
+- 2026-11-20: Security test of the course guides + independent security / structure reviews.
+  Attack script (30 cases: no login, forged/alg-none/edited tokens, path tricks, admin routes,
+  other pages, forged webhook without secret, underpayment) + reviewer findings, verified live:
+  * FIXED underpayment: paying 0.01 on the mock form for a 50.00 order opened the guide and the
+    ledger even recorded 50.00. Webhook processor now refuses grants when the paid amount is
+    below the order total (order UNDERPAID, inbox note; reconciliation still escalates).
+  * FIXED /api/dev/events let any logged-in user write PURCHASE_SUCCEEDED for themselves (only
+    off with NODE_ENV=production): now ENABLE_DEV_EVENTS=1 + admin only, awaited.
+  * FIXED purchase webhooks without an order / naming another user's order granted the listed
+    products (fallback paths): now NO_MATCHING_ORDER, nothing granted.
+  * FIXED malformed pool id crashed the server (Express 4 async error): uuid check + process
+    unhandledRejection handler. JWT verify pinned to HS256. Guide pages Cache-Control: no-store.
+  * Reconciliation: a replay the processor refuses (UNDERPAID / NO_MATCHING_ORDER) is escalated as
+    PAYMENT_REFUSED instead of being counted as fixed; verify-m2-m6 case C (54.00 for 55.00) now
+    expects refused + escalated, no access.
+  * DONE 2026-11-20 (owner approved): JWT_SECRET and MOCK_WEBHOOK_SECRET in .env replaced with
+    random 64-hex values (only those two lines). Everyone was signed out; the mock provider must be
+    restarted to pick up the new MOCK_WEBHOOK_SECRET (until then its webhooks are rejected).
+  * Not yet done (reviewed): rate limiting on login/register/step-up, CSRF Origin check,
+    unverified-email coupons/identity pricing, error messages leaking internals, mock provider
+    admin routes unauthenticated, refund window. Structure review: fat routes, duplicated order
+    creation / refund / resolveCatalogProduct, scattered config, tests on the dev DB.
+- 2026-11-20: Coupons on agent purchases + rate limits + error text.
+  * purchase_intents: list_amount_cents, discount_cents, coupon_code, coupon_rule_id; amount_cents
+    is the discounted amount. agentPurchase.quote (cart rules via validateCoupon, course as a
+    one-item cart; free result refused), propose(couponCode), setCoupon (owner, PROPOSED only),
+    approve(expectAmountCents: atomic, stale card -> PRICE_CHANGED), token pins list + coupon,
+    execute re-checks the coupon (disabled / changed -> COUPON_INVALID, FAILED, no order), order
+    subtotal / discount / applied_rule_id, line paid_cents = discounted. Assistant tool
+    propose_purchase(couponCode): only codes the user typed. Card: struck price, Apply / Remove.
+    Browser-tested with Groq: "buy Intro to SQL with coupon code DEMO" -> 20.00 -> 19.00, Remove,
+    NOTREAL refused, demo applied, mock paid 19.00, ledger 19.00, history complete.
+  * rateLimit.js: login per email (fails) + per IP, register per IP, step-up per user; refused
+    before bcrypt. Found by the test: hit() blocked at the limit (N-1 allowed) -> fixed.
+  * errorHandler.js: generic message + reference; cart / seat checkout errors generic.
+  * Suites: verify-agent-coupons, verify-security (11 suites in npm run verify).
+- 2026-11-20: Independent review of all uncommitted changes; every finding fixed and tested:
+  * Mock adapter had a built-in fallback secret when MOCK_WEBHOOK_SECRET is unset -> removed (all
+    mock webhooks rejected, startup warning); constant-time compare.
+  * Underpayment check ignored currency -> amount AND currency must match the order (items' catalog
+    currency). A later full payment on the same order still completes it.
+  * Login / step-up limits were counted after bcrypt (parallel guesses slipped through) -> counted
+    up front, cleared on success. Per email+IP (5) + per email from anywhere (50) + per IP (30).
+    trust proxy = loopback (ngrok visitors keep their own IP).
+  * Step-up race: removing a coupon while approving without password -> approve now requires the
+    shown amount and re-checks the password threshold in the same UPDATE (STEP_UP_REQUIRED).
+  * ADMIN_EMAIL can't be registered (ADMIN_ALLOW_REGISTER=1 for first setup).
+  * Admin preview of guides; guide title hidden on 403; coupon codes with dots accepted;
+    UNDERPAID agent orders shown as finished with a clear message.
+  * Live re-run: 30 guide attacks 0 leaks; dev route 404; forged webhook / admin session with the
+    old example secrets rejected (secrets rotated). 11 suites pass.

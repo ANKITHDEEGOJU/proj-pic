@@ -13,6 +13,7 @@
 //   POST /assistant/approve/:id        Approve button on a purchase card (+ password above the threshold)
 //   POST /assistant/continue/:id       "Complete purchase" button on an approved card
 //   POST /assistant/cancel/:id         Cancel button on a card
+//   POST /assistant/coupon/:id         coupon field on a card (apply / remove, only before approval)
 //   GET  /assistant/pay/:id            "Pay with Razorpay" on a card: the request's checkout link
 //   GET  /assistant/card/:id           one card (cards waiting for payment refresh themselves with it)
 //   GET  /assistant/checkout-closed    Razorpay checkout closed without paying: cancels that payment
@@ -24,6 +25,7 @@
 
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
+const rateLimit = require('../services/rateLimit');
 const pool = require('../db');
 const { requireAuth } = require('../auth');
 const { layout, esc } = require('../views');
@@ -34,6 +36,18 @@ const { getAdapter } = require('../payment/registry');
 
 const money = (cents, cur) => `${(cents / 100).toFixed(2)} ${esc(cur)}`;
 const amountLabel = (i) => money(i.amount_cents, i.currency);
+// Price with its coupon: "<s>50.00</s> 40.00 USD (coupon SAVE10)", or just the amount.
+const priceLabel = (i) => i.coupon_code
+  ? `<s style="color:#5B5F6E">${money(i.list_amount_cents ?? i.amount_cents, i.currency)}</s> ${amountLabel(i)} <small>(coupon <code>${esc(i.coupon_code)}</code>)</small>`
+  : amountLabel(i);
+// The amount the user sees when clicking Approve: approving is refused if the price changed since.
+const seenAmount = (i) => `<input type="hidden" name="amount" value="${Number(i.amount_cents)}">`;
+// Coupon on a request that is still waiting for approval: Apply a code, or Remove the one applied.
+const couponForm = (i) => i.coupon_code
+  ? chatForm(`/assistant/coupon/${i.id}`, `<input type="hidden" name="coupon" value=""><small>Coupon <code>${esc(i.coupon_code)}</code>: -${money(i.discount_cents || 0, i.currency)}</small>
+      <button type="submit" class="alt" style="padding:0.15rem 0.6rem;font-size:0.8rem;margin-left:0.3rem">Remove</button>`, 'display:block;margin:0 0 0.5rem 0')
+  : chatForm(`/assistant/coupon/${i.id}`, `<input name="coupon" maxlength="40" placeholder="Coupon code (optional)" autocomplete="off" style="max-width:12rem;margin:0 0.3rem 0 0;padding:0.25rem 0.5rem;font-size:0.85rem">
+      <button type="submit" class="alt" style="padding:0.2rem 0.7rem;font-size:0.85rem">Apply</button>`, 'display:block;margin:0 0 0.5rem 0');
 const PROVIDER_LABEL = { razorpay: 'Razorpay (test mode)', mock: 'Mock provider' };
 const payLabel = (i) => esc(PROVIDER_LABEL[i.provider] || i.provider);
 const STATUS_COLOR = {
@@ -127,7 +141,7 @@ function purchaseCard(catalog, i, { error = '', oob = false } = {}) {
   const pay = agent.paymentState(i);
   let actions = '';
   if (i.status === 'PROPOSED') {
-    actions = chatForm(`/assistant/approve/${i.id}`, `${providerChoice(i)}${needsStepUp(i)
+    actions = couponForm(i) + chatForm(`/assistant/approve/${i.id}`, `${seenAmount(i)}${providerChoice(i)}${needsStepUp(i)
       ? `<input type="password" name="password" autocomplete="new-password" placeholder="Your password (over ${money(STEPUP_ABOVE(), i.currency)})" required style="max-width:15rem;margin-right:0.4rem">` : ''}
       <button type="submit">Approve ${amountLabel(i)}</button>`) + ' ' +
       chatForm(`/assistant/cancel/${i.id}`, '<button type="submit" class="alt">Cancel</button>');
@@ -144,6 +158,8 @@ function purchaseCard(catalog, i, { error = '', oob = false } = {}) {
     actions = '<span class="ok">Paid. The course is in your library.</span> <a href="/courses">Go to Courses</a>';
   } else if (pay === 'FAILED') {
     actions = '<span class="err">Payment failed. Nothing was charged.</span> <span class="msg">Ask the assistant to buy it again.</span>';
+  } else if (pay === 'UNDERPAID') {
+    actions = '<span class="err">The payment did not match the price, so the course was not unlocked.</span> <span class="msg">The support team will review it.</span>';
   } else if (pay === 'CANCELLED') {
     actions = '<span class="err">Payment cancelled at checkout. Nothing was charged.</span> <span class="msg">Ask the assistant to buy it again.</span>';
   } else if (pay === 'UNPAID' || (i.status === 'FAILED' && pay === 'PENDING')) {
@@ -161,7 +177,7 @@ function purchaseCard(catalog, i, { error = '', oob = false } = {}) {
   const done = !assistant.isOpenRequest(i);
   return `<div id="pc-${i.id}"${done ? ' class="pc-done"' : ''}${oob ? ' hx-swap-oob="true"' : ''}${poll} style="margin:0 0 0.6rem 0;padding:0.6rem 0.8rem;border:1px solid #D7DAE5;border-radius:8px;background:#fff">
   <div style="display:flex;justify-content:space-between;gap:0.5rem;flex-wrap:wrap">
-    <span><b>${esc(courseName(catalog, i.item_id))}</b> · ${amountLabel(i)}${i.status === 'PROPOSED' ? '' : ` · ${payLabel(i)}`}</span>
+    <span><b>${esc(courseName(catalog, i.item_id))}</b> · ${priceLabel(i)}${i.status === 'PROPOSED' ? '' : ` · ${payLabel(i)}`}</span>
     <span>${badge(i.status)}${pay ? ` · ${badge(pay)}` : ''} · <a href="/agent/intents/${i.id}">details</a></span>
   </div>
   ${error ? `<div class="err" style="margin-top:0.4rem">${esc(error)}</div>` : ''}
@@ -238,7 +254,7 @@ function assistantCard(chat = { log: '', cards: '' }) {
   const ready = assistant.isConfigured();
   return `<div class="card">
   <h3>LEARNX Assistant <small style="font-weight:normal">(AI agent${ready ? `, ${esc(assistant.providers().map((p) => p.name[0].toUpperCase() + p.name.slice(1)).join(' with fallback to '))}` : ''})</small></h3>
-  <p><small>Tell the assistant what you want. It looks up courses and <em>proposes</em> a purchase at the catalog price;
+  <p><small>Tell the assistant what you want. It looks up courses and <em>proposes</em> a purchase at the catalog price (minus a coupon, if you give it one or enter one on the card);
   you approve it with the button on the card; then it completes the purchase. It can't approve or change a price.</small></p>
   ${ready ? '' : '<p class="err">Not set up: put GROQ_API_KEY (free at console.groq.com) in .env and restart the app.</p>'}
   <div id="chat-log" style="max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid #E3E5EC;border-radius:8px;padding:0.5rem 0.75rem;margin-bottom:0.75rem">${chat.log
@@ -314,13 +330,13 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
   <table>
     <tr><th>Item</th><td>${esc(courseName(catalog, i.item_id))} (<code>${esc(i.item_id)}</code>)</td></tr>
     <tr><th>Merchant</th><td>${esc(i.merchant)}</td></tr>
-    <tr><th>Amount</th><td><b>${amountLabel(i)}</b></td></tr>
+    <tr><th>Amount</th><td><b>${priceLabel(i)}</b>${i.coupon_code ? ` <small>(list price minus ${money(i.discount_cents || 0, i.currency)})</small>` : ''}</td></tr>
     <tr><th>Payment</th><td>${payLabel(i)}${pay ? ` · ${badge(pay)}` : ''}</td></tr>
     <tr><th>Status</th><td>${badge(i.status)}${i.expires_at && i.status === 'APPROVED' ? ` · approval valid until ${esc(new Date(i.expires_at).toLocaleTimeString())}` : ''}
       ${i.failure_reason ? `<br><small>${esc(i.failure_reason)}</small>` : ''}</td></tr>
   </table>
   ${i.status === 'PROPOSED' ? `<form method="POST" action="/agent/intents/${i.id}/approve" style="display:inline">
-    ${providerChoice(i)}${stepUp ? `<label>Amount is over ${money(STEPUP_ABOVE(), i.currency)}: enter your password to approve
+    ${seenAmount(i)}${providerChoice(i)}${stepUp ? `<label>Amount is over ${money(STEPUP_ABOVE(), i.currency)}: enter your password to approve
       <input type="password" name="password" autocomplete="new-password" required></label>` : ''}
     <button type="submit">Approve this purchase</button></form>` : ''}
   ${open ? `<form method="POST" action="/agent/intents/${i.id}/cancel" style="display:inline"><button type="submit" class="alt">Cancel</button></form>` : ''}
@@ -363,12 +379,28 @@ async function applyProviderChoice(req, i) {
   return agent.setProvider({ intentId: i.id, userId: req.user.id, provider: String(p), ctx: userCtx(req) });
 }
 
+// What approving must still hold at the moment of the database update: the amount the user saw
+// (required; a form without it is refused as out of date) and, when no password was checked, that
+// the amount is still below the password threshold (a coupon removed in another tab can't slip a
+// bigger amount through without the password).
+const approveGuards = (req, i) => ({
+  expectAmountCents: req.body.amount === undefined || req.body.amount === '' ? 'missing' : req.body.amount,
+  noPasswordMaxCents: needsStepUp(i) ? null : STEPUP_ABOVE(),
+});
+
 // Step-up check for approving. Returns an error message, or null when approving may go ahead.
 async function stepUpError(req, i) {
   if (i.status !== 'PROPOSED' || !needsStepUp(i)) return null;
+  // STEPUP_MAX_FAILS attempts per user per window, counted before the password is checked (so
+  // parallel requests get no extra guesses); a correct password clears the count.
+  const limited = rateLimit.hit('stepUpFail', req.user.id);
+  if (limited.blocked) {
+    await agent.approveDenied({ intentId: i.id, userId: req.user.id, code: 'STEP_UP_LOCKED', message: 'Too many wrong passwords', ctx: userCtx(req) });
+    return `Too many wrong passwords. Try again in ${rateLimit.waitText(limited.retryAfterSec)}.`;
+  }
   const u = (await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id])).rows[0];
-  const ok = u && req.body.password && (await bcrypt.compare(String(req.body.password), u.password_hash).catch(() => false));
-  if (ok) return null;
+  const ok = u && req.body.password && (await bcrypt.compare(String(req.body.password).slice(0, 200), u.password_hash).catch(() => false));
+  if (ok) { rateLimit.reset('stepUpFail', req.user.id); return null; }
   await agent.approveDenied({ intentId: i.id, userId: req.user.id, code: 'STEP_UP_FAILED', message: 'Wrong or missing password', ctx: userCtx(req) });
   return 'Password is wrong or missing. The purchase was not approved.';
 }
@@ -405,7 +437,7 @@ router.post('/agent/intents/:id/approve', requireAuth, async (req, res, next) =>
     const err = await stepUpError(req, i);
     if (err) return res.status(403).send(layout('Purchase request', reviewPage(req, i, await agent.listEvents(i.id), { error: err }), req.user));
     await applyProviderChoice(req, i);
-    await agent.approve({ intentId: i.id, userId: req.user.id, ctx: userCtx(req) });
+    await agent.approve({ intentId: i.id, userId: req.user.id, ...approveGuards(req, i), ctx: userCtx(req) });
     if (i.agent_name === assistant.AGENT_NAME) await completeViaAssistant(req, i);
     res.redirect(303, '/agent');
   } catch (e) {
@@ -451,12 +483,29 @@ router.post('/assistant/approve/:id', requireAuth, async (req, res, next) => {
     if (err) return res.send(purchaseCard(catalog, i, { error: err, oob: true }));
     try {
       await applyProviderChoice(req, i);
-      await agent.approve({ intentId: i.id, userId: req.user.id, ctx: userCtx(req) });
+      await agent.approve({ intentId: i.id, userId: req.user.id, ...approveGuards(req, i), ctx: userCtx(req) });
     } catch (e) {
       if (!(e instanceof agent.AgentPurchaseError)) throw e;
       return res.send(await cardUpdate(req, (await agent.getIntent(i.id)) || i, { error: e.message, oob: true, inLog: true }));
     }
     res.send(await completeViaAssistant(req, i));
+  } catch (e) { next(e); }
+});
+
+// Coupon field on a card (only while the request waits for approval): apply a code, or remove it
+// (empty code). The card is redrawn with the new price, or with the reason the code was refused.
+router.post('/assistant/coupon/:id', requireAuth, async (req, res, next) => {
+  try {
+    const { catalog } = req.app.locals.engine;
+    const i = await ownIntent(req);
+    if (!i) return res.send('<p class="err">Purchase request not found.</p>');
+    try {
+      const updated = await agent.setCoupon({ intentId: i.id, userId: req.user.id, couponCode: String(req.body.coupon ?? '').slice(0, 60), catalog, ctx: userCtx(req) });
+      res.send(purchaseCard(catalog, updated, { oob: true }));
+    } catch (e) {
+      if (!(e instanceof agent.AgentPurchaseError)) throw e;
+      res.send(purchaseCard(catalog, (await agent.getIntent(i.id)) || i, { error: e.message, oob: true }));
+    }
   } catch (e) { next(e); }
 });
 

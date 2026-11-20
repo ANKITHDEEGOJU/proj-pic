@@ -13,6 +13,7 @@ A course storefront built with Node.js, Express and PostgreSQL. Users can browse
 - Organizations with seat packs, and subscription renew / cancel (one renewal at a time; Refund refunds the whole pass)
 - Usage quotas on a premium feature (sandbox "AI summary"), per user or pooled per organization
 - Agent-approved purchases with **LEARNX Assistant**, an AI agent (Groq): it proposes, you approve with a button, a signed one-time approval lets it complete the purchase
+- **Course guides**: one document per course, published by the admin; a learner can open it only while they have access (purchase, pass, seat, grant), and it closes on refund or when the pass ends
 - Admin **Assistant Log**: every assistant chat turn (message, reply, tools, model, tokens, errors), admin only, kept even when a user clears their chat
 
 ## Requirements
@@ -29,7 +30,7 @@ createdb learnx       # or create the database another way
 npm run db:init           # applies db/schema.sql
 ```
 
-`db/schema.sql` can be run again at any time: it only adds what is missing. Run `npm run db:init` again **after every update** (the 2026-11-20 changes add the `assistant_log` table and the `orders.refund_scope`, `checkout_key` and `checkout_url` columns).
+`db/schema.sql` can be run again at any time: it only adds what is missing. Run `npm run db:init` again **after every update** (the 2026-11-20 changes add the `assistant_log`, `course_docs` and `course_doc_events` tables and the `orders.refund_scope`, `checkout_key` and `checkout_url` columns).
 
 Main variables in `.env`:
 
@@ -53,6 +54,10 @@ cd mock-provider && npm start      # optional mock payment provider on :3001
 ```
 
 Then open http://localhost:3000/login, register an account, and visit `/courses`. Admin pages are at `/admin`.
+
+**Secrets:** `JWT_SECRET` and `MOCK_WEBHOOK_SECRET` must be your own random values, never the ones in `.env.example` (anyone who knows them can sign an admin session or forge a mock payment). Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. The app warns at startup when a secret still equals the example value, and refuses to start with `NODE_ENV=production`. The mock provider reads the same `.env`, so restart both after changing `MOCK_WEBHOOK_SECRET`. `POST /api/dev/events` (write ledger events directly) exists only with `ENABLE_DEV_EVENTS=1`, for the admin.
+
+**Limits on password guessing** (in memory, per app instance; every attempt is counted before the password is checked, so parallel requests get no extra tries, and a successful login clears the count): `LOGIN_MAX_FAILS` (5) attempts per email from one IP, `LOGIN_MAX_PER_EMAIL` (50) per email from any IP (so a stranger can't cheaply lock your account) and `LOGIN_MAX_PER_IP` (30) per IP, per `LOGIN_WINDOW_MINUTES` (15); `REGISTER_MAX_PER_IP` (10) sign-ups per IP per hour; `STEPUP_MAX_FAILS` (5) wrong approval passwords per user per window. A blocked attempt is refused before the password is checked, with *Too many attempts. Try again in …*. Errors never show internal details to the browser: the page gets *Server error (ref abc12345)* and the log has the full error under that reference. Behind a tunnel or proxy on the same machine (ngrok) the visitor's real address is used (`TRUST_PROXY`, default `loopback`; only a local proxy is trusted, so a remote client can't fake its IP). The `ADMIN_EMAIL` address can't be claimed by signing up (set `ADMIN_ALLOW_REGISTER=1` once to create it). Payments must match the order: the amount and the currency (paying the right number in another currency grants nothing). Checks: `npm run verify:security`.
 
 Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port 3000 in use), another instance is still running: find it with `ss -ltnp | grep :3000` (or `lsof -i :3000`) and stop it (`kill <pid>`), then start again. The same applies to the mock provider on port 3001. After changing code in `mock-provider/`, restart the mock provider too.
 
@@ -82,6 +87,21 @@ Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port
 - Refunding or charging back a pack unassigns every seat. Refunds wait for the provider's webhook, like course refunds.
 - A seat pack whose checkout was cancelled, failed or not paid in time is shown as one line (*Payment cancelled. Nothing was charged.*); if the provider still confirms the payment later, the pack becomes active.
 - After paying for seats (mock or Razorpay) you return to **`/org`** with *Payment received*; *Simulate Failure* or closing / cancelling the checkout also returns there (*Payment failed* / *Payment cancelled. Nothing was charged.*). The checkout pages only accept the return targets `agent` and `org`.
+
+## Course guides (paid content)
+
+Each course has one guide, shipped as a file in `content/<course id>.md` (`intro-to-sql.md`, `event-sourcing-101.md`, `payments-in-depth.md`).
+
+- **The admin can preview** any published guide (*admin preview*) without owning the course.
+- **The admin publishes it.** **Admin → Course content** (`/admin/content`) lists every course with its file: **Add to course**, **Update from file** (after editing the file), **Remove**, **View**. Adding twice changes nothing. Every add / update / remove is kept in an append-only history with the admin's email. Until a guide is added, learners see nothing.
+- **Access is checked on every request.** `/courses/<course>/doc` asks the same access decision as everything else, each time it is opened: purchase, All-Access Pass, organization seat or admin / scholarship grant all open it. Nothing like "has access to the guide" is stored, so:
+  - a purchase opens it as soon as the payment webhook arrives (the course card shows **Open guide**);
+  - a confirmed refund, chargeback, revoke or unassigned seat closes it;
+  - an All-Access Pass closes it the moment the pass ends (no event needed).
+- **An open guide closes itself.** The page re-checks every 30 seconds; when access has ended it reloads and shows why (*Your purchase of this course was refunded…*, *Your All-Access Pass has ended…*).
+- Without access the page answers 403 with the reason; the course card says *Includes the course guide (opens once you have access)*.
+- Documents are shown with a small built-in Markdown renderer that escapes everything first (headings, paragraphs, lists, code, bold), so a file can't inject HTML.
+- Tables `course_docs`, `course_doc_events`; code in `src/services/courseDocs.js`, `src/services/markdown.js`, `src/routes/content.js`; checks in `npm run verify:content`.
 
 ## Webhook retries and reconciliation
 
@@ -280,6 +300,8 @@ There is **no approve tool**. The assistant has its own agent identity (`learnx-
 
 Privacy: your messages and the course list are sent to the model provider (Groq, or Google for Gemini). No passwords, cards or approval tokens are sent.
 
+**Coupons on agent purchases.** Say the code to the assistant ("buy Intro to SQL with code DEMO"; it passes only a code you typed, never one it made up), or type it in the coupon field on the card before approving (**Apply** / **Remove**). The same rules as the cart apply (active, not expired, right course, eligible account). The card shows ~~list price~~ discounted price; refused codes say why and change nothing; a coupon that would make the course free is refused. The approval locks the discounted amount, list price and coupon; at payment the coupon is checked again, and if it was disabled or changed meanwhile the purchase stops with *Coupon … is no longer valid*, nothing charged. **Approve** also carries the price the card showed: if a coupon was applied or removed in another tab, approving is refused with *The price changed*. The order stores subtotal, discount and the coupon rule, so the ledger records what was really paid. Checks: `npm run verify:coupons`.
+
 **Settings (optional):** `AGENT_APPROVAL_TTL_SECONDS` (300), `AGENT_STEPUP_ABOVE_CENTS` (3000), `AGENT_PROPOSALS_PER_DAY` (20), `AGENT_PROPOSAL_TTL_HOURS` (24), `AGENT_UNPAID_MINUTES` (30), `AGENT_SWEEP_INTERVAL_MS` (60000, 0 = off), `AGENT_APPROVAL_SECRET` (derived from `JWT_SECRET`), `MERCHANT_ID` (`LEARNX`), `AGENT_DEFAULT_PROVIDER` (`razorpay` with test keys, else `mock`), `ASSISTANT_MESSAGES_PER_DAY` (30), `ASSISTANT_CARD_DONE_MS` (5000), `ASSISTANT_LOG_DAYS` (90), `GROQ_API_KEY`, `GROQ_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `LLM_PROVIDER`, `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`.
 
 **Removed (2026-11-19):** the *Simulated agent* panel (buttons that proposed without AI, and the page that showed the approval token for tampering demos), *Agent keys* for outside agents, the `/agent/api/*` JSON API and `scripts/agent-client.js`. Tampering, replay, expiry and wrong-agent cases are still checked by `npm run verify:m7` against the purchase service.
@@ -292,7 +314,9 @@ Privacy: your messages and the course list are sent to the model provider (Groq,
 - **Admin Assistant Log** at `/admin/assistant` (admin only): every chat turn with message, reply, tools, model, tokens, time and errors; search, *Errors only* / *Flagged* filters, per-user view. Append-only; kept `ASSISTANT_LOG_DAYS`.
 - **Pass:** one renewal at a time; Cancel renewal refunds a paid renewal in full; Refund refunds every payment of the current pass and then ends its free (admin / scholarship) time.
 - **Seats:** after the seat checkout you return to `/org` with the result.
+- **Coupons on agent purchases** (tell the assistant the code or enter it on the card), **payment checks** (paying less than the order, or a payment message without a matching order of that user, grants nothing), **login / sign-up / approval-password limits**, generic error messages, new secrets required.
 - **One order / one grant per click:** cart and seat checkouts and admin grants are idempotent (`npm run verify:idempotency`).
+- **Course guides:** one guide per course (`content/`), published from **Admin → Course content**, opened only with access; refund or pass expiry closes it, even while it is open.
 - After updating: `npm run db:init`, restart the app and the mock provider.
 
 ## End-to-end test report
@@ -303,6 +327,7 @@ Privacy: your messages and the course list are sent to the model provider (Groq,
 
 ```
 db/schema.sql        Database schema
+content/             Course guides (one Markdown file per course, published from Admin -> Course content)
 mock-provider/       Standalone fake payment provider that sends webhooks
 src/server.js        App entry point
 src/routes/          HTTP routes (auth, courses, cart, checkout, admin, webhooks)
@@ -315,5 +340,5 @@ src/views.js         HTML templates
 ## Verification
 
 ```bash
-npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model) and idempotency (one order / grant per click) checks against Postgres
+npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model), idempotency (one order / grant per click), course guide (access-checked content), agent coupon and security (limits, forged sessions, dev route, error text) checks against Postgres
 ```

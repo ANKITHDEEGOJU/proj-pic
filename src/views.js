@@ -278,11 +278,12 @@ ${
             : d.grantedVia === 'SEAT_ASSIGNED'
               ? '<small style="color:#2e7d32">Seat from your organization (not refundable)</small>'
               : '<small style="color:#2e7d32">Granted access (not refundable)</small>'
-      } <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}" hx-swap="innerHTML">Access</button> <button class="alt" hx-get="/courses/${s}/ai-summary" hx-target="#a-${s}" hx-swap="innerHTML">AI summary</button>
+      } ${require('./services/courseDocs').isPublished(p.id) ? `<a href="/courses/${s}/doc"><button class="alt" type="button">Open guide</button></a>` : ''} <button class="alt" hx-get="/courses/${s}/access" hx-target="#a-${s}" hx-swap="innerHTML">Access</button> <button class="alt" hx-get="/courses/${s}/ai-summary" hx-target="#a-${s}" hx-swap="innerHTML">AI summary</button>
 <div id="a-${s}" class="msg"></div><div class="msg">${esc(msg)}</div>`
     : (inCart
       ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
       : `<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`)
+      + (require('./services/courseDocs').isPublished(p.id) ? '<div><small style="color:#5B5F6E">Includes the course guide (opens once you have access)</small></div>' : '')
 
       + (msg ? `<div class="msg">${esc(msg)}</div>` : '') // e.g. "Refund processed. Access revoked."
 }

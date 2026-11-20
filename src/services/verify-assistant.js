@@ -398,7 +398,7 @@ const findIntentId = (msgs) => {
   // Approve button: the user's click approves, then the assistant completes the purchase.
   // (Password step-up is checked in verify-m7; test users have no real password.)
   process.env.AGENT_STEPUP_ABOVE_CENTS = "1000000";
-  const ha = await post(`/assistant/approve/${hi.id}`, { password: "", provider: "razorpay" });
+  const ha = await post(`/assistant/approve/${hi.id}`, { password: "", provider: "razorpay", amount: String((await agent.getIntent(hi.id)).amount_cents) });
   assert.equal(ha.status, 200);
   assert.match(ha.text, /Approved /);
   assert.ok(!/execute_purchase|✅/.test(ha.text), "no tool lines or emoji");

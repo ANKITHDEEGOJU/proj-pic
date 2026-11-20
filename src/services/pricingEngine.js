@@ -203,9 +203,7 @@ async function validateCoupon(code, user, isSubscriptionCart, cartItems = []) {
     const subPrice = await resolveSubscriptionPrice(user);
     subtotalCents = subPrice.priceCents;
   } else {
-    console.log("Subtotal - ",subtotalCents );
     subtotalCents = cartItems.reduce((sum, item) => sum + item.unit_price_cents,0);
-    console.log("Subtotal - ",subtotalCents );
   }
   
   // Course Scoping & Eligible Subtotal Filter

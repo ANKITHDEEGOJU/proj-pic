@@ -23,6 +23,7 @@ async function loadManagedOrg(req, orgId) {
 }
 
 async function loadManagedPool(req, poolId) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(poolId))) return null; // a malformed id used to crash the server
   const p = await seats.getPool(poolId);
   if (!p) return null;
   if (p.owner_user_id !== req.user.id && !req.user.isAdmin) return null;
@@ -203,7 +204,7 @@ router.post('/org/seats/checkout', requireAuth, async (req, res) => {
   } catch (e) {
     if (e instanceof seats.SeatError) return res.send(err(e.message));
     console.error('[org] seat checkout failed:', e);
-    res.status(500).send(err(`Checkout failed: ${e.message || e.error?.description || 'provider error'}`));
+    res.status(500).send(err('Checkout failed. Nothing was charged. Please try again.'));
   }
 });
 

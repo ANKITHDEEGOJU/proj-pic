@@ -3,7 +3,9 @@
 const { randomUUID } = require('node:crypto');
 const { PaymentProviderAdapter } = require('../adapter');
 
-const MOCK_SECRET = process.env.MOCK_WEBHOOK_SECRET || 'mock_dev_secret_123';
+// No built-in default: without MOCK_WEBHOOK_SECRET every mock webhook is rejected (a default in the
+// source would let anyone who reads it forge payments).
+const MOCK_SECRET = () => process.env.MOCK_WEBHOOK_SECRET || null;
 
 // In-memory store of payments for refunds + reconciliation.
 const payments = new Map();
@@ -35,8 +37,11 @@ class MockPaymentAdapter extends PaymentProviderAdapter {
 
   // Header signature verification with safe fallback
   verifyWebhook(rawBody, headers) {
-    const incomingSecret = headers['x-mock-secret'] || headers['X-Mock-Secret'];
-    return incomingSecret === MOCK_SECRET;
+    const incoming = String(headers['x-mock-secret'] || headers['X-Mock-Secret'] || '');
+    const secret = MOCK_SECRET();
+    if (!secret || !incoming) return false;
+    const a = Buffer.from(incoming), b = Buffer.from(secret);
+    return a.length === b.length && require('node:crypto').timingSafeEqual(a, b);
   }
 
   // Normalize mock payload → CommerceEvent
@@ -123,7 +128,7 @@ async refund({ providerPaymentId, amount, currency, userId, productId, orderId }
     try {
       r = await fetch(`${base}/refund/${cleanId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET },
+        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET() || '' },
         body: JSON.stringify({
           userId: userId || pay.userId,
           productId: productId || pay.productId,
@@ -151,7 +156,7 @@ async refund({ providerPaymentId, amount, currency, userId, productId, orderId }
     try {
       r = await fetch(`${base}/api/charge/${encodeURIComponent(providerPaymentId)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET },
+        headers: { 'Content-Type': 'application/json', 'x-mock-secret': MOCK_SECRET() || '' },
         body: JSON.stringify({ orderRef, userId, productId, amount, currency }),
       });
     } catch (err) {
@@ -170,7 +175,7 @@ async refund({ providerPaymentId, amount, currency, userId, productId, orderId }
     const base = process.env.MOCK_PROVIDER_URL || 'http://localhost:3001';
     let r;
     try {
-      r = await fetch(`${base}/api${path}`, { headers: { 'x-mock-secret': MOCK_SECRET } });
+      r = await fetch(`${base}/api${path}`, { headers: { 'x-mock-secret': MOCK_SECRET() || '' } });
     } catch (err) {
       throw new Error(`mock provider unreachable (${err.cause?.code || err.message})`);
     }

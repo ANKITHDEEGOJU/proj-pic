@@ -10,7 +10,7 @@ function clearToken(res) { res.clearCookie(COOKIE); }
 // Populates req.user if a valid JWT cookie exists. Never rejects.
 function attachUser(req, _res, next) {
   try {
-    const p = jwt.verify(req.cookies[COOKIE], process.env.JWT_SECRET);
+    const p = jwt.verify(req.cookies[COOKIE], process.env.JWT_SECRET, { algorithms: ['HS256'] });
     const adminEmail = process.env.ADMIN_EMAIL || "admin@learnx.com";
     req.user = { id: p.sub, email: p.email,isAdmin: p.email === adminEmail };
   } catch { req.user = null; }

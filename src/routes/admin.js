@@ -71,6 +71,12 @@ router.get('/admin', requireAdmin, async (req, res) => {
         </div>
 
         <div class="card">
+          <h3>Course content</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Publish each course's guide. Learners can open it only while they have access to the course.</p>
+          <a href="/admin/content"><button class="alt">Manage Course Content →</button></a>
+        </div>
+
+        <div class="card">
           <h3>Assistant Log</h3>
           <p style="color: #5B5F6E; margin-bottom: 1rem;">Every LEARNX Assistant chat turn: messages, replies, tools used, errors, limits and token use.</p>
           <a href="/admin/assistant"><button class="alt">Open Assistant Log →</button></a>
@@ -270,7 +276,7 @@ router.post('/admin/users/grant', requireAdmin, async (req, res) => {
     res.redirect('/admin/users');
   } catch (err) {
     console.error('Error granting user access:', err);
-    res.status(500).send(`Failed to grant access: ${err.message}`);
+    res.status(500).send('Failed to grant access. See the server log.');
   }
 });
 
@@ -325,7 +331,7 @@ router.post('/admin/users/revoke', requireAdmin, async (req, res) => {
     res.redirect('/admin/users');
   } catch (err) {
     console.error('Error revoking user access:', err);
-    res.status(500).send(`Failed to revoke access: ${err.message}`);
+    res.status(500).send('Failed to revoke access. See the server log.');
   }
 });
 
@@ -692,7 +698,7 @@ router.post('/admin/reconciliation/run', requireAdmin, async (req, res) => {
     res.status(out.error ? 500 : 200).json({ runId: out.runId, error: out.error, summary: out.summary });
   } catch (err) {
     console.error('Error running reconciliation:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Reconciliation run failed. See the server log.' });
   }
 });
 
@@ -830,3 +836,6 @@ router.get('/admin/assistant/rows', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+
+// Reused by other admin pages (routes/content.js).
+module.exports.requireAdmin = requireAdmin;

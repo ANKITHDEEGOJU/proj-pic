@@ -316,6 +316,51 @@ async function cleanup() {
   assert.equal(subs.renewalReminder({ ...fakeEnt, expiresAt: new Date(Date.now() + 20 * 86400e3).toISOString() }), null);
   console.log(`[ok] M4 renewal reminder shows only in the last ${subs.REMINDER_DAYS} days`);
 
+  // =============================================================== underpaid payment
+  // The provider reports less than the order costs (e.g. the amount edited on a checkout form):
+  // no access, nothing in the ledger, order UNDERPAID.
+  {
+    const cheap = await newUser("underpaid");
+    const priceCents = Math.round(course.price * 100);
+    const oid = (await pool.query(`INSERT INTO orders (user_id, subtotal_cents, final_payable_cents, provider, status) VALUES ($1,$2,$2,$3,'PENDING') RETURNING id`, [cheap.id, priceCents, PROVIDER])).rows[0].id;
+    await pool.query(`INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, paid_cents) VALUES ($1,'COURSE',$2,$3,1,$3)`, [oid, course.id, priceCents]);
+    const pay = paymentFor(oid, cheap, 1); // 0.01
+    const out = await captured(pay);
+    assert.equal(out.outcome, "UNDERPAID");
+    assert.equal(access(cheap).allowed, false, "no access for 0.01");
+    assert.equal((await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE user_id=$1", [cheap.id])).rows[0].n, 0, "nothing in the ledger");
+    assert.equal(await orderStatus(oid), "UNDERPAID");
+    const inbox = (await pool.query("SELECT status, failure_reason FROM webhook_inbox WHERE provider=$1 AND raw_body::text LIKE $2", [PROVIDER, `%${pay.id}%`])).rows[0];
+    assert.equal(inbox.status, "PROCESSED");
+    assert.match(inbox.failure_reason, /^UNDERPAID: provider reports 0\.01, order total/);
+    assert.equal((await captured(pay)).outcome, "UNDERPAID", "a replay is refused the same way");
+    // Right amount, wrong currency: refused too.
+    const yen = { ...paymentFor(oid, cheap, priceCents), currency: "JPY" };
+    const yOut = await captured(yen);
+    assert.equal(yOut.outcome, "UNDERPAID");
+    assert.match(yOut.note, /currency JPY, order is in USD/);
+    assert.equal(access(cheap).allowed, false);
+    // A full payment on the same order afterwards completes it normally.
+    const full = await captured(paymentFor(oid, cheap, priceCents));
+    assert.equal(full.outcome, "APPENDED");
+    assert.equal(await orderStatus(oid), "COMPLETED");
+    assert.equal(access(cheap).allowed, true, "access once the full amount is paid");
+    console.log("[ok] underpaid payment (0.01, or the right amount in another currency): no access, order UNDERPAID, replay refused; a full payment later completes it");
+
+    // A purchase message without an order, or with someone else's order, grants nothing.
+    const thief = await newUser("noorder");
+    const noOrder = { ...paymentFor(null, thief, priceCents), notes: { userId: thief.id, productId: course.id } };
+    assert.equal((await captured(noOrder)).outcome, "NO_MATCHING_ORDER");
+    const victimOrder = (await pool.query(`INSERT INTO orders (user_id, subtotal_cents, final_payable_cents, provider, status) VALUES ($1,$2,$2,$3,'PENDING') RETURNING id`, [cheap.id, priceCents, PROVIDER])).rows[0].id;
+    await pool.query(`INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, paid_cents) VALUES ($1,'COURSE',$2,$3,1,$3)`, [victimOrder, course.id, priceCents]);
+    const otherOrder = paymentFor(victimOrder, thief, priceCents); // notes.userId = thief, order belongs to cheap
+    assert.equal((await captured(otherOrder)).outcome, "NO_MATCHING_ORDER");
+    assert.equal(access(thief).allowed, false);
+    assert.equal((await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE user_id=$1", [thief.id])).rows[0].n, 0, "the thief gets nothing");
+    assert.equal((await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE user_id=$1 AND payment_info->>'orderId'=$2", [cheap.id, victimOrder])).rows[0].n, 0, "nothing recorded on the victim's order");
+    console.log("[ok] purchase message with no order / someone else's order -> NO_MATCHING_ORDER, nothing granted");
+  }
+
   // =============================================================== coupon cookie
   const cookies = {};
   const res = { headersSent: false, cookie: (k, v) => (cookies[k] = v), clearCookie: (k) => (cookies[k] = null) };

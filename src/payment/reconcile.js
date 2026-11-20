@@ -400,7 +400,18 @@ class Reconciler {
       [adapter.name, `recon:${eventKey}`, JSON.stringify(payload), JSON.stringify({ 'x-recon-run': String(ctx.runId) })]
     );
     const row = rows[0];
-    const result = row.status === 'PROCESSED' ? { outcome: 'DUPLICATE' } : await this.processor.process(row, adapter);
+    const refusedBefore = row.status === 'PROCESSED' && /^(UNDERPAID|NO_MATCHING_ORDER)/.test(row.failure_reason || '');
+    const result = refusedBefore ? { outcome: 'REFUSED', reason: row.failure_reason }
+      : row.status === 'PROCESSED' ? { outcome: 'DUPLICATE' } : await this.processor.process(row, adapter);
+    // The processor refused to grant (paid less than the order, or no order of that user): that is
+    // not a repair. Escalate it to the admin instead of counting it as fixed.
+    if (['UNDERPAID', 'NO_MATCHING_ORDER', 'REFUSED'].includes(result.outcome)) {
+      await this.#issue(ctx, 'PAYMENT_REFUSED', ref, {
+        ...meta,
+        details: { ...(meta.details || {}), inboxId: row.id, reason: result.note || result.reason || result.outcome },
+      });
+      return false;
+    }
     if (result.outcome === 'FAILED' || result.outcome === 'IN_PROGRESS') {
       await this.#issue(ctx, 'REPLAY_FAILED', `${kind}:${ref}`, {
         ...meta,

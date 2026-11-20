@@ -152,6 +152,7 @@ class WebhookProcessor {
     const normalizedEvents = Array.isArray(event) ? event : [event];
     let lastLedgerEventId = null;
     let appendedAny = false;
+    let underpaid = null;
 
     for (const singleEvent of normalizedEvents) {
       const { _raw, ...normalized } = singleEvent;
@@ -167,6 +168,25 @@ class WebhookProcessor {
         //    A failed payment of a cart order is recorded per item too (no access change);
         //    its productId is the comma-joined cart, which is not a catalog product.
         const isFailed = commerceEvent.eventType === 'PURCHASE_FAILED';
+        // Never grant for less than the order costs: the provider's message says what was paid,
+        // the order says what it costs. Less -> no access, order UNDERPAID, reconciliation escalates
+        // the AMOUNT_MISMATCH. (The ledger amounts come from the order, so this check must be here.)
+        // A purchase grants access only for one of our orders, placed by the same user. A message
+        // that names products but no order (or someone else's order) grants nothing.
+        if (commerceEvent.eventType === 'PURCHASE_SUCCEEDED') {
+          const why = await this.#orderMismatch(orderId, commerceEvent.userId);
+          if (why) {
+            underpaid = { orderId: orderId || null, note: why };
+            continue;
+          }
+        }
+        if (orderId && commerceEvent.eventType === 'PURCHASE_SUCCEEDED') {
+          const short = await this.#underpaid(orderId, commerceEvent.amount, commerceEvent.currency);
+          if (short) {
+            underpaid = short;
+            continue;
+          }
+        }
         if (orderId && (commerceEvent.eventType === 'PURCHASE_SUCCEEDED' || isFailed)) {
           const itemsRes = await pool.query(
             `SELECT item_id, item_type, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
@@ -312,6 +332,14 @@ class WebhookProcessor {
       }
     }
 
+    if (underpaid && !appendedAny) {
+      await pool.query(
+        `UPDATE webhook_inbox SET status='PROCESSED', processed_at=now(), failure_reason=$2, next_retry_at=NULL WHERE id=$1`,
+        [id, underpaid.note]
+      );
+      return { outcome: /^UNDERPAID/.test(underpaid.note) ? 'UNDERPAID' : 'NO_MATCHING_ORDER', ...underpaid };
+    }
+
     await pool.query(
       `UPDATE webhook_inbox SET status='PROCESSED', processed_at=now(), ledger_event_id=$2, failure_reason=NULL, next_retry_at=NULL WHERE id=$1`,
       [id, lastLedgerEventId]
@@ -321,6 +349,39 @@ class WebhookProcessor {
       outcome: appendedAny ? 'APPENDED' : 'DUPLICATE',
       ledgerEventId: lastLedgerEventId,
     };
+  }
+
+  // Why a purchase message must not grant anything (null = it matches an order of that user).
+  async #orderMismatch(orderId, userId) {
+    if (!orderId || !/^[0-9a-f-]{36}$/i.test(String(orderId))) return 'NO_MATCHING_ORDER: purchase message names no order; nothing granted';
+    const order = (await pool.query('SELECT user_id FROM orders WHERE id = $1', [String(orderId)])).rows[0];
+    if (!order) return `NO_MATCHING_ORDER: order ${orderId} does not exist; nothing granted`;
+    if (userId && String(order.user_id) !== String(userId)) return `NO_MATCHING_ORDER: order ${orderId} belongs to another user; nothing granted`;
+    return null;
+  }
+
+  // A payment for less than the order total: mark the order UNDERPAID (unless it was already
+  // completed by a full payment) and report it. Returns null when the amount is enough.
+  async #underpaid(orderId, paidMajor, paidCurrency) {
+    const order = (await pool.query('SELECT final_payable_cents, status FROM orders WHERE id::text = $1', [String(orderId)])).rows[0];
+    if (!order) return null;
+    // The order's currency: its items' catalog currency (orders store no currency of their own).
+    const items = (await pool.query('SELECT item_id FROM order_line_items WHERE order_id::text = $1', [String(orderId)])).rows;
+    const currencies = [...new Set(items.map((r) => String(this.ledger.catalog?.get?.(r.item_id)?.currency || 'USD').toUpperCase()))];
+    const want = currencies.length === 1 ? currencies[0] : null;
+    const got = String(paidCurrency || '').toUpperCase();
+    const paidMinor = Math.round(Number(paidMajor) * 100);
+    const currencyOk = !want || got === want;
+    if (currencyOk && Number.isFinite(paidMinor) && paidMinor >= order.final_payable_cents) return null;
+    const note = !currencyOk
+      ? `UNDERPAID: provider reports currency ${got || 'none'}, order is in ${want}; no access granted`
+      : `UNDERPAID: provider reports ${Number.isFinite(paidMinor) ? (paidMinor / 100).toFixed(2) : 'no amount'}, order total ${(order.final_payable_cents / 100).toFixed(2)}; no access granted`;
+    await pool.query(
+      `UPDATE orders SET status='UNDERPAID', updated_at=now() WHERE id::text = $1 AND status NOT IN ('COMPLETED','REFUND_PENDING','REFUNDED','CHARGED_BACK')`,
+      [String(orderId)]
+    );
+    console.warn(`[webhook] order ${orderId}: ${note}`);
+    return { orderId, paidMinor, orderMinor: order.final_payable_cents, note };
   }
 
   // Records a failed attempt and schedules the next one with exponential backoff,
