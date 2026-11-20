@@ -8,21 +8,6 @@ const { resolveSubscriptionPrice } = require('../services/pricingEngine');
 const { isRefundPending } = require('../services/refundStatus');
 const { passState, cardOpts } = require('../services/subscriptions');
 
-// Helper to look up catalog item by id or slug safely
-function resolveCatalogProduct(catalog, key) {
-  if (!catalog || !key) return null;
-  if (typeof catalog.get === 'function') {
-    const item = catalog.get(key);
-    if (item) return item;
-  }
-  if (typeof catalog.list === 'function') {
-    for (const item of catalog.list()) {
-      if (item.id === key || item.slug === key) return item;
-    }
-  }
-  return null;
-}
-
 // GET /courses/subscription-banner
 router.get('/courses/subscription-banner', requireAuth, async (req, res) => {
   try {
@@ -112,7 +97,7 @@ router.get('/courses', requireAuth, async (req, res) => {
 // GET /courses/:slug/card - HTMX Card status polling
 router.get('/courses/:slug/card', requireAuth, async (req, res) => {
   const { catalog, decisions } = req.app.locals.engine;
-  const p = resolveCatalogProduct(catalog, req.params.slug);
+  const p = catalog.get(req.params.slug);
   if (!p) return res.status(404).end();
 
   try {

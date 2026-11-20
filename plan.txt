@@ -435,3 +435,29 @@ CHANGE LOG 2026-11-20
     UNDERPAID agent orders shown as finished with a clear message.
   * Live re-run: 30 guide attacks 0 leaks; dev route 404; forged webhook / admin session with the
     old example secrets rejected (secrets rotated). 11 suites pass.
+- 2026-11-20: Structure clean-up, step 1 (behaviour unchanged; npm run verify 11/11 after each step):
+  * Removed dead code: src/domain/commerce.js (old, ungated copy of the dev-events route, never
+    loaded), src/services/cartService.js (never imported, older add-to-cart logic).
+  * resolveCatalogProduct copied in 4 route files -> catalog.get() (already finds id or slug).
+  * checkoutOnce.sendRepeat replaces the same reply snippet in cart.js (3x) and org.js.
+  * services/orders.js createOrder: the only place orders + line items are written (cart, single
+    checkout, seat packs, agent purchases); checks line amounts add up to the order total. Fixed on
+    the way: the single checkout stored the discounted price as the unit price.
+  * services/refunds.js requestRefund: the only place a provider refund is requested (course
+    refund route + pass refunds / renewal cancel); removed a dead pass branch in the route.
+  * Tests moved from src/ to test/ (git mv, imports rewritten); seed.js -> test/fixtures/.
+  * No top-level import cycles (checked). Dev route currency fallback INR -> USD.
+  Further restructuring (config module, splitting admin.js / views.js, error types, lint,
+  node:test, CI) was considered and not pursued: the owner decided it isn't needed.
+- 2026-11-20: /org: failed / cancelled / expired seat checkouts no longer stack up. Each is a short
+  notice that fades and collapses after ORG_NOTICE_FADE_MS (6000), like the ?checkout= result note
+  (which is also removed from the address bar); after ORG_UNPAID_SHOW_SECONDS (120) since the order
+  ended it is not listed. Pack rows are kept (a late payment still activates the pack). Covered in
+  test/verify-idempotency.js.
+- 2026-11-20: Readability pass (no behaviour change; npm run verify 11/11):
+  * POST request logging only with LOG_REQUESTS=1 (was: every POST body printed); commented-out
+    console.log lines removed.
+  * One money()/when() display helper exported from views.js (were 5 slightly different copies in
+    agent.js, admin.js, content.js, org.js; the org page keeps its $ prefix).
+  * Stale "simulated agent" name/comments -> keyless agent; outdated refund comments fixed.
+  * 'use strict' in every src file.

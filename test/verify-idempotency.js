@@ -12,11 +12,11 @@ const { randomUUID } = require("node:crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { attachUser } = require("../auth");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { attachUser } = require("../src/auth");
 
 process.env.MOCK_PROVIDER_URL = "http://mock.test"; // checkout links only; nothing is called
 const userIds = [];
@@ -54,12 +54,12 @@ async function cleanup() {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
   app.use(cookieParser());
-  app.use(require("./cartSession"));
+  app.use(require("../src/services/cartSession"));
   app.use(attachUser);
   app.locals.engine = engine;
-  app.use(require("../routes/admin"));
-  app.use(require("../routes/cart"));
-  app.use(require("../routes/org"));
+  app.use(require("../src/routes/admin"));
+  app.use(require("../src/routes/cart"));
+  app.use(require("../src/routes/org"));
   app.use((err, _req, res, _next) => { console.error(err); res.status(500).send(err.message); });
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
@@ -127,7 +127,15 @@ async function cleanup() {
   org = await get(owner, "/org");
   assert.match(org, /Payment cancelled<\/span>\. Nothing was charged\./);
   assert.doesNotMatch(org, /Waiting for payment|paid \$40\.00/);
-  console.log("[ok] seat pack whose checkout was cancelled: one line 'Payment cancelled. Nothing was charged.' (no 'Waiting for payment' / 'paid')");
+  assert.match(org, /class="card org-notice"[^>]*>\s*<small>[^<]*2 seats/, "the line is a notice that fades out");
+  assert.match(org, /classList\.add\('gone'\)/, "the page fades notices after a few seconds");
+  // An unpaid checkout that ended a while ago is not listed any more (the pack row stays).
+  await pool.query("UPDATE orders SET updated_at = now() - interval '10 minutes' WHERE user_id=$1", [owner.id]);
+  org = await get(owner, "/org");
+  assert.doesNotMatch(org, /Payment cancelled<\/span>/, "old unpaid checkout not listed");
+  assert.match(org, /No seat packs yet/);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM org_seat_pools p JOIN organizations o ON o.id=p.org_id WHERE o.owner_user_id=$1", [owner.id])).rows[0].n, 1, "the pack row is kept");
+  console.log("[ok] seat pack whose checkout was cancelled: a short notice that fades out (no 'Waiting for payment' / 'paid'); after a while it is no longer listed (row kept)");
 
   // ------------------------------------------------------------ admin grant
   const student = await newUser("grant");

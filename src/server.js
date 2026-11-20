@@ -1,3 +1,5 @@
+'use strict';
+
 require("dotenv").config();
 const express = require("express");
 const cookieParser = require("cookie-parser");
@@ -53,17 +55,18 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
   app.use(cookieParser());
   app.use(require('./services/cartSession')); // keeps the applied coupon across page loads
   app.use(attachUser);
-  app.use((req, res, next) => {
-  if (req.method === 'POST') {
-    console.log(`\n[${new Date().toISOString()}] POST ${req.path}`);
-    console.log('Headers:', { 'content-type': req.headers['content-type'], 'hx-request': req.headers['hx-request'] });
-    // Never write passwords (login / register forms) to the log.
-    const body = req.body && typeof req.body === 'object' ? { ...req.body } : req.body;
-    if (body && typeof body === 'object') for (const k of Object.keys(body)) if (/pass(word)?|secret|token/i.test(k)) body[k] = '[redacted]';
-    console.log('Body:', body);
+  // Debug only (LOG_REQUESTS=1): log every POST with its form fields. Passwords, secrets and
+  // tokens are never written to the log.
+  if (process.env.LOG_REQUESTS === '1') {
+    app.use((req, res, next) => {
+      if (req.method === 'POST') {
+        const body = req.body && typeof req.body === 'object' ? { ...req.body } : req.body;
+        if (body && typeof body === 'object') for (const k of Object.keys(body)) if (/pass(word)?|secret|token/i.test(k)) body[k] = '[redacted]';
+        console.log(`[${new Date().toISOString()}] POST ${req.path}`, body);
+      }
+      next();
+    });
   }
-  next();
-});
   app.use(require("./routes/auth"));
   app.use(require("./routes/admin"));
   app.use(require("./routes/content"));       // course guides (admin publishes, access-checked)

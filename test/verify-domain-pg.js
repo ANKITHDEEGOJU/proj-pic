@@ -4,10 +4,10 @@ require("dotenv").config();
 delete process.env.SUB_DURATION_MINUTES; // demo switch off: checks expect real 30-day periods
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const pool = require("../db");
-const { createEngine } = require("./index");
-const { loadProducts } = require("./catalogLoader");
-const { PgLedgerStore } = require("./stores/pgLedgerStore");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain/index");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
 
 (async () => {
   const products = await loadProducts(),
@@ -220,7 +220,7 @@ const { PgLedgerStore } = require("./stores/pgLedgerStore");
 
   // Coupon split always adds up to what was paid.
   {
-    const { allocatePaidCents } = require("../services/pricingEngine");
+    const { allocatePaidCents } = require("../src/services/pricingEngine");
     for (const [lines, fin] of [[[2000, 3500], 5225], [[2000, 3500, 5000], 10000], [[1, 1, 1], 100], [[2999], 2999], [[0, 0], 0]]) {
       const parts = allocatePaidCents(lines, fin);
       assert.equal(parts.reduce((a, b) => a + b, 0), fin);

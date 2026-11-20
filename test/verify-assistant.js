@@ -16,18 +16,18 @@ const { randomUUID } = require("node:crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { attachUser } = require("../auth");
-const agent = require("./agentPurchase");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { attachUser } = require("../src/auth");
+const agent = require("../src/services/agentPurchase");
 
 // The assistant reads its model settings from the environment on every call: point it at
 // the fake model only, whatever .env says.
 for (const k of ["LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "GROQ_API_KEY", "GEMINI_API_KEY", "GROQ_BASE_URL", "GEMINI_BASE_URL", "ASSISTANT_MESSAGES_PER_DAY"])
   delete process.env[k];
-const assistant = require("./assistant");
+const assistant = require("../src/services/assistant");
 
 const userIds = [];
 const servers = [];
@@ -370,7 +370,7 @@ const findIntentId = (msgs) => {
   app.use(attachUser);
   app.locals.engine = engine;
   app.locals.agentStartPayment = startPayment;
-  app.use(require("../routes/agent"));
+  app.use(require("../src/routes/agent"));
   app.use((err, _req, res, _next) => { console.error(err); res.status(500).send(err.message); });
   const web = app.listen(0);
   servers.push(web);
@@ -546,7 +546,7 @@ const findIntentId = (msgs) => {
     const aapp = express();
     aapp.use(cookieParser());
     aapp.use(attachUser);
-    aapp.use(require("../routes/admin"));
+    aapp.use(require("../src/routes/admin"));
     const aweb = aapp.listen(0);
     servers.push(aweb);
     await new Promise((r) => aweb.once("listening", r));

@@ -1,3 +1,5 @@
+'use strict';
+
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const pool = require('../db');

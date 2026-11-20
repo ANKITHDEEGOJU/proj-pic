@@ -21,13 +21,13 @@ const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { attachUser } = require("../auth");
-const agent = require("./agentPurchase");
-const limit = require("./rateLimit");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { attachUser } = require("../src/auth");
+const agent = require("../src/services/agentPurchase");
+const limit = require("../src/services/rateLimit");
 // Clears every login counter (per email+IP, per email, per IP) between scenarios.
 const resetLogin = () => { for (const k of [...limit._buckets.keys()]) if (/^login(Fail|Email|Ip):/.test(k)) limit._buckets.delete(k); };
 
@@ -65,12 +65,12 @@ async function cleanup() {
   app.use(attachUser);
   app.locals.engine = engine;
   app.locals.agentStartPayment = async () => ({ status: "CHECKOUT", redirectUrl: "http://mock.test/pay/x" });
-  app.use(require("../routes/auth"));
-  app.use(require("../routes/commerce"));
-  app.use(require("../routes/agent"));
-  app.use(require("../routes/org"));
+  app.use(require("../src/routes/auth"));
+  app.use(require("../src/routes/commerce"));
+  app.use(require("../src/routes/agent"));
+  app.use(require("../src/routes/org"));
   app.get("/boom", () => { throw new Error('relation "secret_internal_table" does not exist'); });
-  app.use(require("../errorHandler"));
+  app.use(require("../src/errorHandler"));
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -208,7 +208,7 @@ async function cleanup() {
   console.log("[ok] errors: generic message with a reference, no internal text; malformed ids on org / assistant routes -> no 500, server up");
 
   // Unset mock secret: every mock webhook is rejected (no built-in default).
-  const { MockPaymentAdapter } = require("../payment/adapters/mock");
+  const { MockPaymentAdapter } = require("../src/payment/adapters/mock");
   const saved = process.env.MOCK_WEBHOOK_SECRET;
   delete process.env.MOCK_WEBHOOK_SECRET;
   const m = new MockPaymentAdapter();

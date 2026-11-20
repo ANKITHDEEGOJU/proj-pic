@@ -17,7 +17,7 @@ const { randomUUID } = require("node:crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
-const pool = require("../db");
+const pool = require("../src/db");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "learnx-content-"));
 process.env.CONTENT_DIR = dir;
@@ -40,11 +40,11 @@ async function cleanup() {
   const file = path.join(dir, `${COURSE}.md`);
   fs.writeFileSync(file, "# Doc Test Guide\n\nThe secret lesson body.\n\nInjected <b>tag</b> and <script>x</script>.\n");
 
-  const { createEngine } = require("../domain");
-  const { loadProducts } = require("../domain/catalogLoader");
-  const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-  const { attachUser } = require("../auth");
-  const docs = require("./courseDocs");
+  const { createEngine } = require("../src/domain");
+  const { loadProducts } = require("../src/domain/catalogLoader");
+  const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+  const { attachUser } = require("../src/auth");
+  const docs = require("../src/services/courseDocs");
   const engine = createEngine({ products: await loadProducts(), store: new PgLedgerStore(pool) });
   await engine.projection.rebuildFromLedger();
   const { ledger } = engine;
@@ -63,8 +63,8 @@ async function cleanup() {
   app.use(cookieParser());
   app.use(attachUser);
   app.locals.engine = engine;
-  app.use(require("../routes/content"));
-  app.use(require("../routes/courses"));
+  app.use(require("../src/routes/content"));
+  app.use(require("../src/routes/courses"));
   app.use((err, _req, res, _next) => { console.error(err); res.status(500).send(err.message); });
   await docs.refresh();
   server = app.listen(0);

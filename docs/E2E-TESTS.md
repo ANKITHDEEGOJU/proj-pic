@@ -1,7 +1,8 @@
 # LEARNX end-to-end test report
 
 First run on 2026-11-20 (UTC evening of 2026-11-19); second run (cart, subscriptions, Razorpay cart/pass refunds, chat card removal) on 2026-11-20 05:45–06:05 UTC against the running app, with the real Groq model
-(`openai/gpt-oss-120b`), Razorpay **test mode** and the local mock provider.
+(`openai/gpt-oss-120b`), Razorpay **test mode** and the local mock provider. Later runs on 2026-11-20 (sections 9–15) cover the
+assistant log, pass rules and seat return, course guides, security attacks, agent coupons and the fixes from an independent review.
 
 ## How the run was set up
 
@@ -141,9 +142,12 @@ agent / price changed / already owned / provider switch / `PAYMENT_PENDING` / `P
 false claims, server-side lookup, rate-limit fallback, daily limit, finished card marked for removal
 with one outcome line, no card on `/agent` for finished requests, degenerate model output cleaned).
 
-`npm run verify:failures` passed duplicate and delay; its drop / reorder / refund-500 steps need the
+`npm run verify:failures` passed duplicate and delay in this run; its drop / reorder / refund-500 steps need the
 servers started with `RECON_GRACE_SECONDS=0 RECON_STUCK_REFUND_MINUTES=0` and localhost URLs (see the
-script header), which was not the configuration during this run. The same drop case passed manually (W2).
+script header). **Update:** in that configuration all 6 cases passed later (section 11, F1).
+
+Since then the automated suites grew to 11 (adding idempotency, course guides, agent coupons and security)
+and moved from `src/` to `test/`; all pass (section 15).
 
 ## 6. Defects found and fixed during the run
 
@@ -166,7 +170,7 @@ script header), which was not the configuration during this run. The same drop c
 
 ## 7. Notes and open points
 
-- **Shared session.** The owner was using the same account in parallel (the Event Sourcing 101 approval with password and its Razorpay payment at 18:43 were not made by the test run; the run had just cancelled that checkout, which is how A15 was observed). Chrome password autofill into the approval password box cannot be ruled out for that approval: a browser that saves the password weakens the step-up. Consider `autocomplete="new-password"` on the step-up box if that matters.
+- **Shared session.** The owner was using the same account in parallel (the Event Sourcing 101 approval with password and its Razorpay payment at 18:43 were not made by the test run; the run had just cancelled that checkout, which is how A15 was observed). Chrome password autofill into the approval password box cannot be ruled out for that approval: a browser that saves the password weakens the step-up. **Done:** the step-up box now has `autocomplete="new-password"` (section 11, X4).
 - **Groq free tier** rate-limits after a few quick messages; add `GEMINI_API_KEY` for the fallback.
 - **Razorpay saved card / recurring**: not available on the test account (removed earlier).
 - **Browser extension permissions**: the mock provider's ngrok page and, later, the app's ngrok page became non-clickable / non-readable for the automation; those checks were done through the server and the database.
@@ -174,11 +178,13 @@ script header), which was not the configuration during this run. The same drop c
 ## 8. Re-running
 
 ```bash
-npm run verify                                   # everything automated (no keys needed)
+npm run verify                                   # the 11 automated suites in test/ (no keys needed)
 # failure switches end to end (servers in the configuration from the script header):
 npm run verify:failures
 ```
-Manual checklist: sections 1–4 above, in that order; use a test account for anything that needs a password or a card.
+Manual checklist: sections 1–4, then 9–14, in that order; use a test account for anything that needs a password or a card.
+After changing `.env`, restart both the app and the mock provider (a mock with an old `MOCK_WEBHOOK_SECRET` gets every
+webhook rejected, so payments stay pending).
 
 ## 9. Admin assistant log (browser, 2026-11-20)
 

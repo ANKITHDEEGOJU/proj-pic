@@ -6,15 +6,15 @@
 require("dotenv").config();
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { registry } = require("./registry");
-const { RazorpayPaymentAdapter } = require("./adapters/razorpay");
-const { WebhookProcessor, RETRY } = require("./webhookProcessor");
-const { retryDueWebhooks } = require("./retryWorker");
-const { Reconciler } = require("./reconcile");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { registry } = require("../src/payment/registry");
+const { RazorpayPaymentAdapter } = require("../src/payment/adapters/razorpay");
+const { WebhookProcessor, RETRY } = require("../src/payment/webhookProcessor");
+const { retryDueWebhooks } = require("../src/payment/retryWorker");
+const { Reconciler } = require("../src/payment/reconcile");
 
 const PROVIDER = "recontest";
 const quiet = { log() {}, error: console.error };

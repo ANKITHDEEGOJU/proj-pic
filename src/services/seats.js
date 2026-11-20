@@ -12,6 +12,7 @@
 
 const { randomUUID } = require('node:crypto');
 const pool = require('../db');
+const { createOrder } = require('./orders');
 
 class SeatError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -54,7 +55,7 @@ async function activeSeats(poolId, db = pool) {
 
 async function listPools(orgId) {
   const { rows } = await pool.query(
-    `SELECT p.*, o.status AS order_status, o.provider, o.final_payable_cents
+    `SELECT p.*, o.status AS order_status, o.provider, o.final_payable_cents, o.updated_at AS order_updated_at
        FROM org_seat_pools p JOIN orders o ON o.id = p.order_id
       WHERE p.org_id=$1 ORDER BY p.created_at`,
     [orgId]
@@ -101,18 +102,10 @@ async function createSeatPackOrder({ userId, orgName, course, seats, provider, c
       ).rows[0];
     }
     // Coupons never apply to seat packs (see README "Commercial rules").
-    const orderId = (
-      await client.query(
-        `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, provider, status, checkout_key)
-         VALUES ($1,$2,0,$2,$3,'PENDING',$4) RETURNING id`,
-        [userId, totalCents, provider, checkoutKey]
-      )
-    ).rows[0].id;
-    await client.query(
-      `INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, paid_cents)
-       VALUES ($1,'SEAT_PACK',$2,$3,$4,$5)`,
-      [orderId, course.id, unitCents, seats, totalCents]
-    );
+    const orderId = await createOrder(client, {
+      userId, provider, subtotalCents: totalCents, finalCents: totalCents, checkoutKey,
+      lines: [{ itemType: 'SEAT_PACK', itemId: course.id, unitPriceCents: unitCents, quantity: seats, paidCents: totalCents }],
+    });
     const poolRow = (
       await client.query(
         `INSERT INTO org_seat_pools (org_id, course_id, seats, order_id) VALUES ($1,$2,$3,$4) RETURNING *`,

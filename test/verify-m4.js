@@ -7,15 +7,15 @@ require("dotenv").config();
 delete process.env.SUB_DURATION_MINUTES; // demo switch off: checks expect real 30-day periods
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { RazorpayPaymentAdapter } = require("../payment/adapters/razorpay");
-const { WebhookProcessor } = require("../payment/webhookProcessor");
-const seats = require("./seats");
-const subs = require("./subscriptions");
-const cartSession = require("./cartSession");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { RazorpayPaymentAdapter } = require("../src/payment/adapters/razorpay");
+const { WebhookProcessor } = require("../src/payment/webhookProcessor");
+const seats = require("../src/services/seats");
+const subs = require("../src/services/subscriptions");
+const cartSession = require("../src/services/cartSession");
 
 const PROVIDER = "m4test";
 class FakeProvider extends RazorpayPaymentAdapter { get name() { return PROVIDER; } }
@@ -193,7 +193,7 @@ async function cleanup() {
   console.log("[ok] M4 one renewal at a time: with a renewal paid in advance, Renew is hidden and refused");
 
   // Provider refunds are stubbed here; the refund webhook is delivered by the test, as in production.
-  const { PaymentService } = require("../payment/service");
+  const { PaymentService } = require("../src/payment/service");
   const realRefund = PaymentService.prototype.initiateRefund;
   const refundCalls = [];
   let refuse = null;

@@ -8,23 +8,10 @@ const { isRenewal, renewBlocked } = require("../services/subscriptions");
 const checkoutOnce = require("../services/checkoutOnce");
 const { randomUUID } = require("node:crypto");
 const { subscriptionCard, courseCard, layout, esc, navCart } = require('../views');
+const cartError = (msg) => `<span style="color:#d32f2f;">${esc(msg)}</span>`;
 const { resolveSubscriptionPrice, validateCoupon, allocatePaidCents } = require('../services/pricingEngine');
 const { PaymentService } = require('../payment/service');
-
-// Helper to look up catalog item by id or slug safely
-function resolveCatalogProduct(catalog, key) {
-  if (!catalog || !key) return null;
-  if (typeof catalog.get === 'function') {
-    const item = catalog.get(key);
-    if (item) return item;
-  }
-  if (typeof catalog.list === 'function') {
-    for (const item of catalog.list()) {
-      if (item.id === key || item.slug === key) return item;
-    }
-  }
-  return null;
-}
+const { createOrder } = require('../services/orders');
 
 async function getCartData(userId, user, catalog) {
   const cartRes = await pool.query(
@@ -34,7 +21,7 @@ async function getCartData(userId, user, catalog) {
   const cartProducts = cartRes.rows.map((r) => r.product_id);
 
   const rawItems = cartProducts
-    .map((key) => resolveCatalogProduct(catalog, key))
+    .map((key) => catalog.get(key))
     .filter(Boolean);
 
   const isSub = rawItems.some((item) => item.type === 'SUBSCRIPTION');
@@ -176,7 +163,7 @@ router.post('/cart/remove', requireAuth, async (req, res) => {
   }
 
   const { catalog } = req.app.locals.engine;
-  const catalogProduct = resolveCatalogProduct(catalog, rawId);
+  const catalogProduct = catalog.get(rawId);
   const storedProductId = catalogProduct ? catalogProduct.slug || catalogProduct.id : rawId;
 
   try {
@@ -338,8 +325,7 @@ router.post('/cart/checkout', async (req, res) => {
   const checkoutKey = checkoutOnce.validKey(body.checkoutKey);
   const earlier = await checkoutOnce.find(userId, checkoutKey);
   if (earlier) {
-    const again = await checkoutOnce.repeatAnswer(earlier);
-    return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+    return checkoutOnce.sendRepeat(res, earlier, cartError);
   }
 
   const client = await pool.connect();
@@ -352,8 +338,7 @@ router.post('/cart/checkout', async (req, res) => {
       // The same click may have just emptied the cart (it is cleared with its order).
       const first = await checkoutOnce.find(userId, checkoutKey);
       if (first) {
-        const again = await checkoutOnce.repeatAnswer(first);
-        return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+        return checkoutOnce.sendRepeat(res, first, cartError);
       }
       return res.status(400).send('<span style="color:#d32f2f;">Your cart is empty.</span>');
     }
@@ -401,44 +386,22 @@ router.post('/cart/checkout', async (req, res) => {
     if (sameClick) {
       await client.query('ROLLBACK');
       inTransaction = false;
-      const again = await checkoutOnce.repeatAnswer(sameClick);
-      return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+      return checkoutOnce.sendRepeat(res, sameClick, cartError);
     }
-
-    const orderRes = await client.query(
-      `INSERT INTO orders (
-        user_id, subtotal_cents, discount_cents, final_payable_cents,
-        applied_rule_id, provider, status, checkout_key
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
-      RETURNING id`,
-      [userId, subtotalCents, discountCents, finalPayableCents, appliedRuleId, provider, checkoutKey]
-    );
-
-    const orderId = orderRes.rows[0].id;
 
     const paidCents = allocatePaidCents(
       cartItems.map((i) => i.priceCents * (i.quantity || 1)),
       finalPayableCents
     );
-    for (const [idx, item] of cartItems.entries()) {
-      await client.query(
-        `INSERT INTO order_line_items (
-          order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          orderId,
-          item.item_type,
-          item.product_id,
-          item.priceCents,
-          item.quantity,
-          item.duration_days,
-          item.scope,
-          paidCents[idx],
-          // M4: buying a pass while one is active extends it (SUBSCRIPTION_RENEWED).
-          item.item_type === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, userId, item.scope),
-        ]
-      );
-    }
+    const orderId = await createOrder(client, {
+      userId, provider, subtotalCents, discountCents, finalCents: finalPayableCents, appliedRuleId, checkoutKey,
+      lines: cartItems.map((item, idx) => ({
+        itemType: item.item_type, itemId: item.product_id, unitPriceCents: item.priceCents, quantity: item.quantity,
+        durationDays: item.duration_days, scope: item.scope, paidCents: paidCents[idx],
+        // M4: buying a pass while one is active extends it (SUBSCRIPTION_RENEWED).
+        renewal: item.item_type === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, userId, item.scope),
+      })),
+    });
 
     await client.query('DELETE FROM cart_items WHERE user_id = $1', [userId]);
 
@@ -524,7 +487,7 @@ router.post('/cart/add', requireAuth, async (req, res) => {
   }
 
   const { catalog, decisions } = req.app.locals.engine;
-  const catalogProduct = resolveCatalogProduct(catalog, rawId);
+  const catalogProduct = catalog.get(rawId);
 
   if (!catalogProduct) {
     return res.status(404).send('Product not found');
@@ -558,7 +521,7 @@ router.post('/cart/add', requireAuth, async (req, res) => {
       const subIdsInCart = existingCart.rows
         .map((r) => r.product_id)
         .filter((id) => {
-          const item = resolveCatalogProduct(catalog, id);
+          const item = catalog.get(id);
           return item?.type === 'SUBSCRIPTION';
         });
 

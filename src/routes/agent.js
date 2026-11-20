@@ -28,13 +28,12 @@ const bcrypt = require('bcryptjs');
 const rateLimit = require('../services/rateLimit');
 const pool = require('../db');
 const { requireAuth } = require('../auth');
-const { layout, esc } = require('../views');
+const { layout, esc, money, when } = require('../views');
 const agent = require('../services/agentPurchase');
 const assistant = require('../services/assistant');
 const { PaymentService } = require('../payment/service');
 const { getAdapter } = require('../payment/registry');
 
-const money = (cents, cur) => `${(cents / 100).toFixed(2)} ${esc(cur)}`;
 const amountLabel = (i) => money(i.amount_cents, i.currency);
 // Price with its coupon: "<s>50.00</s> 40.00 USD (coupon SAVE10)", or just the amount.
 const priceLabel = (i) => i.coupon_code
@@ -62,7 +61,6 @@ const STEPUP_ABOVE = () => {
 const needsStepUp = (i) => i.amount_cents > STEPUP_ABOVE();
 const ttlMinutes = () => Math.round(Number(process.env.AGENT_APPROVAL_TTL_SECONDS || 300) / 60);
 const userCtx = (req) => ({ actor: 'user', ip: req.ip });
-const fmtTime = (d) => (d ? esc(new Date(d).toLocaleString()) : '');
 const CARD_DONE_MS = () => Math.max(0, Number(process.env.ASSISTANT_CARD_DONE_MS ?? 5000) || 0);
 const isUuid = (v) => /^[0-9a-f-]{36}$/i.test(String(v || ''));
 
@@ -297,7 +295,7 @@ scrollChat();
 function agentPage(req, intents, chat, { message = '', error = '' } = {}) {
   const { catalog } = req.app.locals.engine;
   const rows = intents
-    .map((i) => `<tr><td>${fmtTime(i.created_at)}</td><td>${esc(courseName(catalog, i.item_id))}</td>
+    .map((i) => `<tr><td>${when(i.created_at)}</td><td>${esc(courseName(catalog, i.item_id))}</td>
         <td>${amountLabel(i)}</td><td>${payLabel(i)}</td><td>${badge(i.status)}</td><td>${badge(agent.paymentState(i)) || ''}</td>
         <td><a href="/agent/intents/${i.id}">Details</a>${i.status === 'FAILED' ? `<br><small>${esc(i.failure_reason || '')}</small>` : ''}</td></tr>`)
     .join('');
@@ -312,7 +310,7 @@ ${rows || '<tr><td colspan="7">None yet</td></tr>'}</table>`;
 function historyTable(events) {
   if (!events.length) return '';
   const rows = events
-    .map((e) => `<tr><td>${fmtTime(e.created_at)}</td><td>${esc(e.actor)}</td><td>${e.event === 'REJECTED' || e.event === 'APPROVE_DENIED' ? `<b style="color:#d32f2f">${esc(e.event)}</b>` : esc(e.event)}</td>
+    .map((e) => `<tr><td>${when(e.created_at)}</td><td>${esc(e.actor)}</td><td>${e.event === 'REJECTED' || e.event === 'APPROVE_DENIED' ? `<b style="color:#d32f2f">${esc(e.event)}</b>` : esc(e.event)}</td>
       <td>${e.code ? `<code>${esc(e.code)}</code> ` : ''}${esc(e.detail || '')}</td></tr>`)
     .join('');
   return `<h3>History</h3><table><tr><th>Time</th><th>By</th><th>Event</th><th>Details</th></tr>${rows}</table>`;

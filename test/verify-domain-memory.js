@@ -1,10 +1,10 @@
 "use strict";
 // Run: npm run verify:memory   (in-memory ledger store: no Postgres, no network)
 const assert = require("node:assert/strict");
-const { createEngine } = require("./index");
-const { CatalogStore } = require("./catalog");
-const { MemoryLedgerStore } = require("./stores/memoryLedgerStore");
-const { PRODUCTS } = require("./seed");
+const { createEngine } = require("../src/domain/index");
+const { CatalogStore } = require("../src/domain/catalog");
+const { MemoryLedgerStore } = require("../src/domain/stores/memoryLedgerStore");
+const { PRODUCTS } = require("./fixtures/seed");
 
 const log = (...a) => console.log(...a);
 const step = (n, t) => log(`\n=== STEP ${n}: ${t} ===`);

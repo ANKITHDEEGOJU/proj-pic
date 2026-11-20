@@ -11,7 +11,9 @@ const esc = (s) =>
       ]
   );
 
-const money = (cents, cur = 'USD') => `${((cents || 0) / 100).toFixed(2)} ${esc(cur)}`;
+// Shared display helpers (also used by the route files): amount in cents -> "20.00 USD", time -> local text.
+const money = (cents, cur = 'USD') => `${((Number(cents) || 0) / 100).toFixed(2)} ${esc(cur)}`;
+const when = (t) => (t ? new Date(t).toLocaleString() : '-');
 
 const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <html><head><meta charset="utf-8"><title>${esc(title)} · LEARNX</title>
@@ -509,4 +511,6 @@ module.exports = {
   PAGE_SIZE,
   errorFragment,
   esc,
+  money,
+  when,
 };

@@ -5,24 +5,11 @@ const { randomUUID } = require("crypto");
 const pool = require("../db");
 const { requireAuth } = require("../auth");
 const { PaymentService } = require("../payment/service");
+const { createOrder } = require("../services/orders");
+const { requestRefund } = require("../services/refunds");
 const { courseCard, subscriptionCard } = require("../views");
 const { validateCoupon, resolveSubscriptionPrice } = require("../services/pricingEngine");
 const { isRenewal, renewBlocked, refundPass, passState, cardOpts } = require("../services/subscriptions");
-
-// Helper to look up catalog item by id or slug safely
-function resolveCatalogProduct(catalog, key) {
-  if (!catalog || !key) return null;
-  if (typeof catalog.get === "function") {
-    const item = catalog.get(key);
-    if (item) return item;
-  }
-  if (typeof catalog.list === "function") {
-    for (const item of catalog.list()) {
-      if (item.id === key || item.slug === key) return item;
-    }
-  }
-  return null;
-}
 
 router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
   const client = await pool.connect();
@@ -31,7 +18,7 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
   try {
     const { catalog, decisions } = req.app.locals.engine;
 
-    const p = resolveCatalogProduct(catalog, req.params.slug);
+    const p = catalog.get(req.params.slug);
     if (!p) {
       return res.status(404).send("Course not found");
     }
@@ -77,35 +64,15 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
     const body = req.body || {};
     const provider = body.provider === 'razorpay' ? 'razorpay' : 'mock';
 
-    // 1. Insert Order Header
-    const orderRes = await client.query(
-      `INSERT INTO orders (
-        user_id, subtotal_cents, discount_cents, final_payable_cents,
-        applied_rule_id, provider, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
-      RETURNING id`,
-      [req.user.id, subtotalCents, discountCents, finalPayableCents, appliedRuleId, provider]
-    );
-    const orderId = orderRes.rows[0].id;
-
-    // 2. Insert Order Line Item (Required for WebhookProcessor line-item resolution)
     const itemType = p.type || 'COURSE';
-    await client.query(
-      `INSERT INTO order_line_items (
-        order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        orderId,
-        itemType,
-        productId,
-        finalPayableCents,
-        1,
-        p.durationDays || null,
-        p.scope || null,
-        finalPayableCents, // single item: it carries the whole (discounted) payment
-        itemType === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, req.user.id, p.scope),
-      ]
-    );
+    const orderId = await createOrder(client, {
+      userId: req.user.id, provider, subtotalCents, discountCents, finalCents: finalPayableCents, appliedRuleId,
+      lines: [{
+        itemType, itemId: productId, unitPriceCents: priceCents, durationDays: p.durationDays || null, scope: p.scope || null,
+        paidCents: finalPayableCents, // single item: it carries the whole (discounted) payment
+        renewal: itemType === 'SUBSCRIPTION' && isRenewal(req.app.locals.engine.projection, req.user.id, p.scope),
+      }],
+    });
 
     await client.query("COMMIT");
     inTransaction = false;
@@ -139,13 +106,13 @@ router.post(
   async (req, res, next) => {
     try {
       const { catalog, decisions, projection, ledger } = req.app.locals.engine;
-      const p = resolveCatalogProduct(catalog, req.params.slug);
+      const p = catalog.get(req.params.slug);
       if (!p) return res.status(404).end();
 
       const productId = p.slug || p.id;
       const isSub = p.type === "SUBSCRIPTION" || productId.startsWith("sub");
 
-      // 1. Look up entitlement using the correct Projection Engine getter
+      // 1. What is being refunded: the pass (subscription entitlement) or the course.
       let ent = isSub
         ? projection.getSubscription(req.user.id, p.scope || "ALL_ACCESS")
         : projection.get(req.user.id, productId);
@@ -169,8 +136,9 @@ router.post(
         );
       }
 
-      // Which purchase a refund undoes: for a subscription, the most recent PAID period
-      // (a free admin month stacked on top must not block refunding the paid one).
+      // Is anything paid? A pass with only free periods, or a free course grant, has nothing to
+      // refund. (A pass with paid periods is refunded as a whole just below, refundPass; for a
+      // course, refundEventId is the purchase being undone.)
       const refundEventId = ent.type === "SUBSCRIPTION" ? ent.refundableEventId : ent.sourceEventId;
       const isFreeOnly = ent.type === "SUBSCRIPTION"
         ? !refundEventId
@@ -261,7 +229,7 @@ router.post(
       const recordRefund = async (idFor, extraInfo) => {
         const problems = [];
         for (const item of itemsToRefund) {
-          const itemProduct = resolveCatalogProduct(catalog, item.item_id);
+          const itemProduct = catalog.get(item.item_id);
           const itemPrice = item.paidAmount ?? (itemProduct ? itemProduct.price : ((item.unitPriceCents || 0) / 100));
           try {
             await ledger.appendEvent(
@@ -305,56 +273,13 @@ router.post(
       //    webhook processor then writes the REFUND events and marks the order REFUNDED.
       //    A refund.failed webhook reopens the order (REFUND_PENDING -> COMPLETED).
       if (provider && providerPaymentId) {
-        if (orderId) {
-          // Claim the order first: stops double-clicks from issuing two refunds.
-          const claim = await pool.query(
-            // (older orders may still say PENDING even though they were paid)
-            "UPDATE orders SET status='REFUND_PENDING', updated_at=now() WHERE id=$1 AND status IN ('COMPLETED','PENDING') RETURNING id",
-            [orderId]
-          );
-          if (claim.rowCount === 0) {
-            const cur = await pool.query("SELECT status FROM orders WHERE id=$1", [orderId]);
-            const st = cur.rows[0]?.status;
-            if (st === 'REFUND_PENDING') return renderAfter('Refund already in progress.', true);
-            if (st) return renderAfter(`Order is ${st.toLowerCase().replace('_', ' ')}, nothing to refund.`);
-          }
-        }
-
-        const svc = new PaymentService({ catalog });
-        let providerRefundId;
-        try {
-          ({ providerRefundId } = await svc.initiateRefund({ 
-            userId: req.user.id, 
-            productId, 
-            orderId,
-            amount: refundAmount,
-            providerPaymentId, 
-            provider 
-          }));
-        } catch (e) {
-          // Provider said no: nothing changed, reopen the order.
-          if (orderId) {
-            await pool.query(
-              "UPDATE orders SET status='COMPLETED', updated_at=now() WHERE id=$1 AND status='REFUND_PENDING'",
-              [orderId]
-            );
-          }
-          // Razorpay SDK errors carry the text in e.error.description, not e.message.
-          e.message = e.message || e.error?.description || (e.statusCode ? `provider returned HTTP ${e.statusCode}` : 'payment provider refused the refund');
-          console.error('[refund] Provider error:', e.message);
-          if (isSub) {
-            const subPriceInfo = await resolveSubscriptionPrice(req.user, productId, catalog);
-            return res.send(subscriptionCard(false, subPriceInfo, true, ent, { message: `Refund failed: ${e.message}` }));
-          }
-          return res.send(
-            courseCard(p, decisions.evaluateAccess(req.user.id, productId), `Refund failed: ${e.message}`)
-          );
-        }
-
+        const out = await requestRefund({ catalog, userId: req.user.id, orderId, productId, provider, providerPaymentId, amount: refundAmount });
+        if (out.status === 'ALREADY_PENDING') return renderAfter('Refund already in progress.', true);
+        if (out.status === 'NOT_REFUNDABLE') return renderAfter(`Order is ${out.orderStatus.toLowerCase().replace('_', ' ')}, nothing to refund.`);
+        if (out.status === 'REFUSED') return res.send(courseCard(p, decisions.evaluateAccess(req.user.id, productId), `Refund failed: ${out.error}`));
         // Provider accepted the request. Nothing is written to the ledger here: the order stays
         // REFUND_PENDING until the provider's refund webhook confirms it. (The mock provider
         // sends that webhook before this call returns, so the order may already be REFUNDED.)
-        console.log(`[refund] ${provider} refund ${providerRefundId} requested for order ${orderId || '-'}; waiting for webhook`);
         return renderAfter('Refund requested. Access will be removed once the payment provider confirms it.', true);
       }
 
@@ -391,7 +316,5 @@ router.get('/razorpay/checkout', requireAuth, (req, res) => {
   </script></body></html>`);
 });
 
-// Attach helper to router before export so other modules can import it cleanly
-router.resolveCatalogProduct = resolveCatalogProduct;
 
 module.exports = router;

@@ -59,6 +59,8 @@ Then open http://localhost:3000/login, register an account, and visit `/courses`
 
 **Limits on password guessing** (in memory, per app instance; every attempt is counted before the password is checked, so parallel requests get no extra tries, and a successful login clears the count): `LOGIN_MAX_FAILS` (5) attempts per email from one IP, `LOGIN_MAX_PER_EMAIL` (50) per email from any IP (so a stranger can't cheaply lock your account) and `LOGIN_MAX_PER_IP` (30) per IP, per `LOGIN_WINDOW_MINUTES` (15); `REGISTER_MAX_PER_IP` (10) sign-ups per IP per hour; `STEPUP_MAX_FAILS` (5) wrong approval passwords per user per window. A blocked attempt is refused before the password is checked, with *Too many attempts. Try again in …*. Errors never show internal details to the browser: the page gets *Server error (ref abc12345)* and the log has the full error under that reference. Behind a tunnel or proxy on the same machine (ngrok) the visitor's real address is used (`TRUST_PROXY`, default `loopback`; only a local proxy is trusted, so a remote client can't fake its IP). The `ADMIN_EMAIL` address can't be claimed by signing up (set `ADMIN_ALLOW_REGISTER=1` once to create it). Payments must match the order: the amount and the currency (paying the right number in another currency grants nothing). Checks: `npm run verify:security`.
 
+Set `LOG_REQUESTS=1` to log every POST request with its form fields while debugging (passwords and tokens are redacted); it is off by default.
+
 Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port 3000 in use), another instance is still running: find it with `ss -ltnp | grep :3000` (or `lsof -i :3000`) and stop it (`kill <pid>`), then start again. The same applies to the mock provider on port 3001. After changing code in `mock-provider/`, restart the mock provider too.
 
 ## Commercial rules
@@ -85,7 +87,7 @@ Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port
 - Seats are assigned by the member's email (they need a LearnX account). One seat per member per pack, never more than N in use. Usage is counted from the ledger.
 - Unassign takes the seat back; reassign moves it to another member in one step.
 - Refunding or charging back a pack unassigns every seat. Refunds wait for the provider's webhook, like course refunds.
-- A seat pack whose checkout was cancelled, failed or not paid in time is shown as one line (*Payment cancelled. Nothing was charged.*); if the provider still confirms the payment later, the pack becomes active.
+- A seat pack whose checkout was cancelled, failed or not paid in time is shown as a short notice (*Payment cancelled. Nothing was charged.*) that fades out after a few seconds (`ORG_NOTICE_FADE_MS`, default 6000), like the checkout result note; after `ORG_UNPAID_SHOW_SECONDS` (default 120) it is no longer listed at all, so failed attempts don't pile up. The pack row is kept: if the provider still confirms the payment later, the pack becomes active and shows normally.
 - After paying for seats (mock or Razorpay) you return to **`/org`** with *Payment received*; *Simulate Failure* or closing / cancelling the checkout also returns there (*Payment failed* / *Payment cancelled. Nothing was charged.*). The checkout pages only accept the return targets `agent` and `org`.
 
 ## Course guides (paid content)
@@ -109,6 +111,7 @@ Each course has one guide, shipped as a file in `content/<course id>.md` (`intro
 - **Reconciliation (M6):** every 15 minutes (and on demand at `/admin/reconciliation`) the app compares Razorpay's payments and refunds with the ledger. Lost payment/refund webhooks and stuck `REFUND_PENDING` orders are repaired by replaying the missing provider event through the normal webhook pipeline; amount mismatches, partial refunds, unknown payments, failed refunds and dead webhooks are listed for an admin. The mock provider is checked the same way (it keeps its own payment and refund records in `mock-provider/data.json`).
 - **Resolved stays resolved:** when an admin resolves an issue and reconciliation finds the same issue again, it is counted as *acknowledged* instead of being reopened (any open copy is closed with `recon:auto`).
 - **Old unpaid orders:** `PENDING` orders older than `ORDER_PENDING_EXPIRY_MINUTES` (default 60, 0 = off) are marked `EXPIRED` by reconciliation. A payment that still arrives later for an `EXPIRED`, `CANCELLED` or `FAILED` order completes it normally.
+- **Refused payments:** a payment that is less than the order total, in another currency, or not for an order of that user grants nothing (order `UNDERPAID` / `NO_MATCHING_ORDER`); when reconciliation replays such a payment it is escalated as `PAYMENT_REFUSED` (never counted as fixed).
 - **Admin page:** `/admin/reconciliation` shows open issues, fixed issues, the webhook inbox and past runs, 20 rows at a time with **Show more**.
 - **Order states from checkout:** *Cancel* on the provider's page marks the order `CANCELLED` and puts its items back in the cart; a failed payment marks it `FAILED` (it used to stay `PENDING`).
 - **No double purchase:** *Add to Cart* refuses a course you already own (e.g. from an old tab), and checkout checks again: owned items are removed from the cart and nothing is charged.
@@ -187,7 +190,7 @@ Pick a switch, choose for how many calls (0 = until you turn it off), and click 
 
 The admin page also lists the payments the provider has, webhooks it is holding (**Release** sends one now), and every webhook it sent (copies, retries, dropped ones). Like Razorpay, the mock re-sends a webhook that got a 5xx or no answer (after 5 s, 15 s, 45 s).
 
-Automatic check (needs both servers running on localhost): `npm run verify:failures`. See the top of `mock-provider/verify-failure-switches.js` for the settings it needs.
+Automatic check (needs both servers running on localhost): `npm run verify:failures`. See the top of `test/verify-failure-switches.js` for the settings it needs.
 
 ## Usage quotas
 
@@ -250,8 +253,9 @@ You pay on Razorpay test checkout, or on the mock checkout page (Pay / Simulate 
 **Payment per provider**
 | | Razorpay (default) | Mock provider |
 |---|---|---|
-| After a valid execute | A Razorpay order for the approved amount; the card shows **Pay with Razorpay** (test card `5267 3181 8797 5449`, any OTP) | The server charges the payment directly; nothing else to click |
-| Can the amount change? | No - fixed in the Razorpay order; reconciliation flags any `AMOUNT_MISMATCH` | No - taken from the approved request |
+| After a valid execute | A Razorpay order for the approved amount; the card shows **Pay with Razorpay** (test card `5267 3181 8797 5449`, any OTP) | A mock checkout page for the approved amount; the card shows **Pay with Mock provider** (Pay / Simulate Failure / Cancel) |
+| Can the amount change? | No - fixed in the Razorpay order | No - taken from the approved request |
+| Paid less, or in another currency? | Nothing is granted: the order becomes `UNDERPAID` and reconciliation escalates it | Same (e.g. an amount edited on the mock form) |
 | Access | Normal webhook -> `PURCHASE_SUCCEEDED` | Normal webhook -> `PURCHASE_SUCCEEDED` |
 
 **Choosing the provider:** if you say how to pay (*"buy it with the mock provider"*), the assistant proposes with that provider. If you don't, it leaves the choice to you: the card shows **Pay with: Razorpay (test mode) / Mock provider** next to **Approve**, preselected to `AGENT_DEFAULT_PROVIDER` (Razorpay when test keys are set). Your choice is applied when you click Approve; it can only change while the request is waiting for approval, and the change is logged (`PROVIDER_CHANGED`). The price and the approval rules don't depend on the provider. A Razorpay payment with no checkout at all (saved card / card mandate) is not offered: it was built and tried on 2026-11-19, but card mandates are not enabled on the Razorpay test account (see plan.txt), so it was removed.
@@ -267,11 +271,12 @@ You pay on Razorpay test checkout, or on the mock checkout page (Pay / Simulate 
 
 | Request state | Card shows |
 |---|---|
-| `PROPOSED` | **Pay with: Razorpay / Mock** choice, **Approve** (with a password box above 30.00) and **Cancel** |
+| `PROPOSED` | Price (with ~~list price~~ and the coupon when one is applied), a **coupon field** (Apply / Remove), **Pay with: Razorpay / Mock** choice, **Approve** (with a password box above 30.00) and **Cancel** |
 | `APPROVED` | **Complete purchase** (asks the assistant again, e.g. if the model was busy) and **Cancel** |
-| `EXECUTED`, waiting for payment | **Cancel payment** (same as closing checkout), and **Pay with Razorpay** (`/assistant/pay/:id`: the checkout link stored on the request when it was executed, `purchase_intents.pay_url`; for an older request without one, the unpaid Razorpay order is found by its receipt, our order id) |
+| `EXECUTED`, waiting for payment | **Cancel payment** (same as closing checkout), and **Pay with Razorpay / Mock provider** (`/assistant/pay/:id`: the checkout link stored on the request when it was executed, `purchase_intents.pay_url`; for an older request without one, the unpaid Razorpay order is found by its receipt, our order id) |
 | paid | Paid, with a link to Courses |
 | payment failed / cancelled at checkout / not paid in time | that message, "Nothing was charged", no buttons |
+| paid less than the price (`UNDERPAID`) | "The payment did not match the price, so the course was not unlocked", no buttons |
 
 Clicking **Approve** approves (your click) and then sends the assistant *"I approved purchase request …"* (shown as *"Approved Intro to SQL"*), so it completes the purchase without you typing anything. After Razorpay checkout you return to `/agent`. While a payment is pending its card refreshes itself every few seconds, so **Paid**, **Payment failed** (a declined payment: Razorpay's `payment.failed` webhook marks the order `FAILED`) or **Payment cancelled at checkout** appears without a reload; in those last two cases the card says nothing was charged, shows no Pay button, and you can ask the assistant again. Closing the Razorpay checkout without paying cancels that payment (order `CANCELLED`, request `FAILED`) and never puts the course in your cart; if Razorpay still takes the money later, the webhook completes the order and the card shows Paid. When a request is finished (paid, payment failed, cancelled at checkout, not paid in time, request cancelled), the app (not the model) adds one outcome line to the chat, e.g. *"Payment received: … is now in your library"* (green) or *"Payment for … was cancelled at checkout. Nothing was charged."* (red). The card shows its final state for about 5 seconds (`ASSISTANT_CARD_DONE_MS`, default 5000), then fades and collapses smoothly and is removed; after a reload finished requests have no card, only their line (their details stay under *Your purchase requests*). Replies are cleaned before they are shown: if the model degenerates into invisible characters or runs of "…", those are removed (and an unreadable reply is replaced by a plain sentence about what the tools did). The assistant is told not to use emoji or symbols. Purchases through the assistant start on `/agent` only (the course pages have just **Add to Cart**).
 
@@ -284,9 +289,9 @@ Clicking **Approve** approves (your click) and then sends the assistant *"I appr
 |---|---|
 | `list_courses` | courses with price, owned or not, and any open request |
 | `list_my_requests` | the assistant's recent requests and their payment |
-| `propose_purchase` `{ productId, provider? }` | creates a request at the catalog price; the page shows it as a card. `provider` only when you named one; otherwise you pick on the card |
+| `propose_purchase` `{ productId, provider?, couponCode? }` | creates a request at the catalog price (minus a valid coupon); the page shows it as a card. `provider` only when you named one; otherwise you pick on the card. `couponCode` only a code you typed |
 | `check_request` `{ intentId }` | status of one of its requests |
-| `execute_purchase` `{ intentId }` | completes a request **you approved**: `PAID` (mock) or `CHECKOUT` (the card shows the Pay button) |
+| `execute_purchase` `{ intentId }` | completes a request **you approved**: `CHECKOUT` (the card shows the Pay button for Razorpay or the mock checkout page) |
 
 There is **no approve tool**. The assistant has its own agent identity (`learnx-assistant`, one per user, table `agent_keys`), which is what binds a request and its approval token to it.
 
@@ -317,28 +322,48 @@ Privacy: your messages and the course list are sent to the model provider (Groq,
 - **Coupons on agent purchases** (tell the assistant the code or enter it on the card), **payment checks** (paying less than the order, or a payment message without a matching order of that user, grants nothing), **login / sign-up / approval-password limits**, generic error messages, new secrets required.
 - **One order / one grant per click:** cart and seat checkouts and admin grants are idempotent (`npm run verify:idempotency`).
 - **Course guides:** one guide per course (`content/`), published from **Admin → Course content**, opened only with access; refund or pass expiry closes it, even while it is open.
+- **Organization page:** failed or cancelled seat checkouts are short notices that fade out instead of piling up.
+- **Code clean-up:** one place creates orders (`src/services/orders.js`) and one requests refunds (`src/services/refunds.js`); shared display helpers; tests moved to `test/`; dead code removed; request logging only with `LOG_REQUESTS=1`. Behaviour unchanged.
 - After updating: `npm run db:init`, restart the app and the mock provider.
+
+## Project overview and decisions
+
+`docs/LEARNX-COMPLETE-DOCUMENTATION.md`: everything in one place (plan, architecture, products, all decisions ADR-000 to ADR-030, security, test evidence, defects, operations).
+
+`docs/PROJECT-OVERVIEW.md`: the whole project end to end (milestones, architecture diagrams, every component and table, key flows, security model, tests, configuration) and the decision log from ADR-015 on; ADR-000 to ADR-014 are in `docs/Architecture_Decision_Records.md`.
 
 ## End-to-end test report
 
-`docs/E2E-TESTS.md`: the manual end-to-end runs (assistant chat, cart, refunds, webhook failure switches, reconciliation, admin assistant log, pass renew / refund rules, seat checkout return) with the mock provider and Razorpay test mode, results and the defects found.
+`docs/E2E-TESTS.md`: the manual end-to-end runs (assistant chat, cart, refunds, webhook failure switches, reconciliation, admin assistant log, pass renew / refund rules, seat checkout return, course guides, security attacks, agent coupons, review fixes) with the mock provider and Razorpay test mode, results and the defects found.
 
 ## Project structure
 
 ```
-db/schema.sql        Database schema
-content/             Course guides (one Markdown file per course, published from Admin -> Course content)
-mock-provider/       Standalone fake payment provider that sends webhooks
-src/server.js        App entry point
-src/routes/          HTTP routes (auth, courses, cart, checkout, admin, webhooks)
-src/domain/          Commerce ledger, projection and catalog logic
-src/payment/         Payment adapters (mock, Razorpay) and webhook processing
-src/services/        Cart, pricing, seats, subscriptions, usage quotas, agent purchases, agent keys and the AI assistant
-src/views.js         HTML templates
+db/schema.sql          Database schema (safe to re-run: npm run db:init)
+content/               Course guides (one Markdown file per course, published from Admin -> Course content)
+docs/                  End-to-end test report, architecture decision records
+mock-provider/         Standalone fake payment provider that sends webhooks
+src/server.js          App entry point (middleware, routes, background jobs)
+src/errorHandler.js    Last middleware: generic error + reference, details only in the log
+src/routes/            HTTP routes: parse the request, call a service, render (auth, courses, cart,
+                       checkout, org, subscription, agent, content, admin, webhooks)
+src/domain/            Ledger, entitlement projection, access decisions, catalog (no provider / agent code)
+src/payment/           Provider adapters (mock, Razorpay), webhook processor, reconciliation, retries
+src/services/          Use cases shared by routes:
+                         orders.js         the only place orders + line items are created
+                         refunds.js        the only place a provider refund is requested
+                         checkoutOnce.js   one order per checkout click
+                         subscriptions.js  pass lifecycle (renew, cancel, full refund)
+                         seats.js, quotas.js, pricingEngine.js, agentPurchase.js, assistant.js,
+                         courseDocs.js, markdown.js, rateLimit.js, ...
+src/views.js           HTML templates
+test/                  npm run verify suites (verify-*.js) and test fixtures; they run against
+                       DATABASE_URL and remove their own rows (ledger rows stay: append-only)
 ```
 
 ## Verification
 
 ```bash
 npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model), idempotency (one order / grant per click), course guide (access-checked content), agent coupon and security (limits, forged sessions, dev route, error text) checks against Postgres
+npm run verify:failures   # live: mock failure switches end to end (both servers running, settings at the top of the script)
 ```

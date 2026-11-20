@@ -27,6 +27,7 @@
 const crypto = require('node:crypto');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const { createOrder } = require('./orders');
 const quotas = require('./quotas');
 
 class AgentPurchaseError extends Error {
@@ -170,7 +171,7 @@ const priceDetail = (q, currency) => `${q.finalCents} ${currency}${q.code ? ` (l
 
 // ---- propose / approve / cancel ------------------------------------------------------------
 
-async function propose({ userId, productId, provider = 'mock', couponCode = null, agentName = 'simulated-agent', agentKeyId = null, catalog, decisions, ctx = {} }) {
+async function propose({ userId, productId, provider = 'mock', couponCode = null, agentName = 'keyless-agent', agentKeyId = null, catalog, decisions, ctx = {} }) {
   ctx = { actor: `agent:${agentName}`, ...ctx };
   const reject = async (code, message, info) => {
     await logEvent('-', 'REJECTED', { userId, code, detail: `propose ${productId}: ${message}`, ctx });
@@ -204,7 +205,7 @@ async function propose({ userId, productId, provider = 'mock', couponCode = null
     throw e;
   }
 
-  // Daily proposal limit per agent key (or per user for the simulated agent), via M5 quotas.
+  // Daily proposal limit per agent key (or per user for an agent without a key), via M5 quotas.
   const requestKey = `agent-propose:${crypto.randomUUID()}`;
   const quota = { scopeKey: agentKeyId ? `agentkey:${agentKeyId}` : `user:${userId}:agent`, limit: PROPOSALS_PER_DAY() };
   const q = await quotas.consume({ requestKey, quota, feature: 'AGENT_PROPOSE', userId, productId: itemId });
@@ -380,7 +381,8 @@ async function approveDenied({ intentId, userId, code, message, ctx = {} }) {
 // ---- execute -----------------------------------------------------------------------------
 
 // startPayment({ intent, orderId, course }) -> { status: 'PAID'|'CHECKOUT', redirectUrl? }
-// agentKeyId: the key the caller authenticated with (null = simulated browser agent).
+// agentKeyId: the key the caller authenticated with (null = an agent without its own key, whose
+// approval token is handed back to the approver).
 async function execute({ intentId, token, userId, agentKeyId = null, catalog, decisions, startPayment, ctx = {} }) {
   ctx = { actor: 'agent', ...ctx };
   try {
@@ -406,7 +408,7 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
   const i = await getIntent(intentId);
   if (!i || i.user_id !== claims.sub) throw new AgentPurchaseError('NOT_FOUND', 'Purchase request not found.');
   // The request can only be completed by the agent that proposed it (its key, or the
-  // simulated browser agent when it was proposed without a key).
+  // keyless agent when it was proposed without a key).
   if ((i.agent_key_id || null) !== (agentKeyId || null) || (claims.agk || null) !== (i.agent_key_id || null))
     throw new AgentPurchaseError('WRONG_AGENT', 'This approval was given to a different agent.');
   if (i.status === 'CANCELLED') throw new AgentPurchaseError('CANCELLED', 'The user cancelled this purchase.');
@@ -452,16 +454,11 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
       [intentId, claims.nonce]
     );
     if (!won.rowCount) throw new AgentPurchaseError('REPLAYED', 'This approval was already used.');
-    orderId = (await client.query(
-      `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, applied_rule_id, provider, status)
-       VALUES ($1,$2,$3,$4,$5,$6,'PENDING') RETURNING id`,
-      [i.user_id, listCents, listCents - i.amount_cents, i.amount_cents, i.coupon_rule_id || null, i.provider]
-    )).rows[0].id;
-    await client.query(
-      `INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents)
-       VALUES ($1,'COURSE',$2,$3,1,NULL,NULL,$4)`,
-      [orderId, i.item_id, listCents, i.amount_cents]
-    );
+    orderId = await createOrder(client, {
+      userId: i.user_id, provider: i.provider, subtotalCents: listCents, discountCents: listCents - i.amount_cents,
+      finalCents: i.amount_cents, appliedRuleId: i.coupon_rule_id || null,
+      lines: [{ itemType: 'COURSE', itemId: i.item_id, unitPriceCents: listCents, paidCents: i.amount_cents }],
+    });
     await client.query('UPDATE purchase_intents SET order_id=$2 WHERE id=$1', [intentId, orderId]);
     await client.query('COMMIT');
   } catch (e) {

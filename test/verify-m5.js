@@ -6,14 +6,14 @@
 require("dotenv").config();
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { RazorpayPaymentAdapter } = require("../payment/adapters/razorpay");
-const { WebhookProcessor } = require("../payment/webhookProcessor");
-const seats = require("./seats");
-const quotas = require("./quotas");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { RazorpayPaymentAdapter } = require("../src/payment/adapters/razorpay");
+const { WebhookProcessor } = require("../src/payment/webhookProcessor");
+const seats = require("../src/services/seats");
+const quotas = require("../src/services/quotas");
 
 process.env.QUOTA_AI_SUMMARY_USER = "3";
 process.env.QUOTA_AI_SUMMARY_SUBSCRIBER = "7";

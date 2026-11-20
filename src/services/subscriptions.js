@@ -8,6 +8,7 @@
 
 const { randomUUID } = require('node:crypto');
 const pool = require('../db');
+const { requestRefund } = require('./refunds');
 
 // Periods that cost nothing (admin / scholarship grant, org seat): never refunded.
 const FREE = ['MANUAL_GRANT', 'SEAT_ASSIGNED'];
@@ -108,7 +109,6 @@ async function renewBlocked({ ledger, projection, userId, scope = 'ALL_ACCESS' }
 // marks it REFUNDED, exactly like any other refund. Purchases with no provider are refunded directly.
 //   kind: 'PASS_FULL' (Refund: the whole pass) or 'RENEWAL_CANCEL' (Cancel renewal: queued periods)
 async function refundPeriods({ ledger, catalog, user, periods, kind }) {
-  const { PaymentService } = require('../payment/service');
   const byOrder = new Map();
   for (const p of periods) {
     const o = await periodOrder(ledger, p.eventId);
@@ -119,36 +119,11 @@ async function refundPeriods({ ledger, catalog, user, periods, kind }) {
   const results = [];
   for (const o of byOrder.values()) {
     if (o.orderId && o.providerPaymentId) {
-      const claim = await pool.query(
-        `UPDATE orders SET status = 'REFUND_PENDING', refund_scope = $2, updated_at = now()
-          WHERE id::text = $1 AND status IN ('COMPLETED','PENDING') RETURNING final_payable_cents`,
-        [String(o.orderId), kind]
-      );
-      if (!claim.rowCount) {
-        const st = (await pool.query('SELECT status FROM orders WHERE id::text = $1', [String(o.orderId)])).rows[0]?.status;
-        results.push({ orderId: o.orderId, ok: st === 'REFUND_PENDING' || st === 'REFUNDED', status: st || 'MISSING' });
-        continue;
-      }
-      try {
-        const { providerRefundId } = await new PaymentService({ catalog }).initiateRefund({
-          userId: user.id,
-          productId: o.periods[0].productId,
-          orderId: o.orderId,
-          amount: claim.rows[0].final_payable_cents / 100,
-          providerPaymentId: o.providerPaymentId,
-          provider: o.provider || 'mock',
-        });
-        console.log(`[refund] ${kind}: ${o.provider} refund ${providerRefundId} requested for order ${o.orderId}; waiting for webhook`);
-        results.push({ orderId: o.orderId, ok: true, status: 'REFUND_PENDING' });
-      } catch (e) {
-        await pool.query(
-          "UPDATE orders SET status = 'COMPLETED', refund_scope = NULL, updated_at = now() WHERE id::text = $1 AND status = 'REFUND_PENDING'",
-          [String(o.orderId)]
-        );
-        const msg = e.message || e.error?.description || (e.statusCode ? `provider returned HTTP ${e.statusCode}` : 'payment provider refused the refund');
-        console.error(`[refund] ${kind}: provider refused order ${o.orderId}:`, msg);
-        results.push({ orderId: o.orderId, ok: false, error: msg });
-      }
+      const out = await requestRefund({ catalog, userId: user.id, orderId: o.orderId, productId: o.periods[0].productId,
+        provider: o.provider, providerPaymentId: o.providerPaymentId, scope: kind });
+      if (out.status === 'REQUESTED' || out.status === 'ALREADY_PENDING') results.push({ orderId: o.orderId, ok: true, status: 'REFUND_PENDING' });
+      else if (out.status === 'NOT_REFUNDABLE') results.push({ orderId: o.orderId, ok: out.orderStatus === 'REFUNDED', status: out.orderStatus });
+      else results.push({ orderId: o.orderId, ok: false, error: out.error });
     } else {
       // No provider behind it (e.g. dev-simulated events): nobody else will confirm, record it now.
       for (const p of o.periods) {

@@ -16,12 +16,12 @@ const { randomUUID } = require("node:crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
-const pool = require("../db");
-const { createEngine } = require("../domain");
-const { loadProducts } = require("../domain/catalogLoader");
-const { PgLedgerStore } = require("../domain/stores/pgLedgerStore");
-const { attachUser } = require("../auth");
-const agent = require("./agentPurchase");
+const pool = require("../src/db");
+const { createEngine } = require("../src/domain");
+const { loadProducts } = require("../src/domain/catalogLoader");
+const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
+const { attachUser } = require("../src/auth");
+const agent = require("../src/services/agentPurchase");
 
 const TAG = randomUUID().slice(0, 6).toUpperCase();
 const code = (name) => `T${TAG}${name}`;
@@ -209,7 +209,7 @@ async function cleanup() {
   app.use(attachUser);
   app.locals.engine = engine;
   app.locals.agentStartPayment = startPayment;
-  app.use(require("../routes/agent"));
+  app.use(require("../src/routes/agent"));
   app.use((err, _req, res, _next) => { console.error(err); res.status(500).send(err.message); });
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
@@ -269,7 +269,7 @@ async function cleanup() {
   });
   await new Promise((r) => model.listen(0, "127.0.0.1", r));
   process.env.LLM_BASE_URL = `http://127.0.0.1:${model.address().port}`;
-  const assistant = require("./assistant");
+  const assistant = require("../src/services/assistant");
   const ua = await newUser("asst");
   await assistant.chat({ user: ua, text: `please buy it with code ${code("PCT20")}`, catalog, decisions, startPayment, ip: "127.0.0.1" });
   const okResult = seen.find((x) => x.coupon);

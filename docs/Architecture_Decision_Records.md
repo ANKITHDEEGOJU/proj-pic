@@ -5,7 +5,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 | ADR | Title | Status | Milestones |
 |---|---|---|---|
-| [ADR-000](#adr-000--methodology-reaffirmation-9-october-2026) | Methodology reaffirmation (9 October 2026) | **To be completed by the author** | All |
+| [ADR-000](#adr-000--methodology-reaffirmation-9-october-2026) | Methodology reaffirmation (9 October 2026) | Reaffirmed (mentor reference to add, if any) | All |
 | [ADR-001](#adr-001--isolate-payment-providers-behind-an-adapter-contract) | Isolate payment providers behind an adapter contract | Accepted | M1, M2 |
 | [ADR-002](#adr-002--append-only-ledger-as-the-source-of-truth-for-access) | Append-only ledger as the source of truth for access | Accepted | M1, M3 |
 | [ADR-003](#adr-003--move-the-ledger-from-memory-to-postgresql) | Move the ledger from memory to PostgreSQL | Accepted (supersedes the in-memory store) | M3 |
@@ -20,18 +20,17 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 | [ADR-012](#adr-012--ap2-inspired-signed-one-time-approval-instead-of-full-ap2) | AP2-inspired signed one-time approval instead of full AP2 | Accepted | M7 |
 | [ADR-013](#adr-013--llm-assistant-as-an-untrusted-agent-groq-no-approve-tool) | LLM assistant as an untrusted agent (Groq, no approve tool) | Accepted | M7 |
 | [ADR-014](#adr-014--agent-pays-through-checkout-saved-card-mandates-removed) | Agent pays through checkout; saved-card mandates removed | Accepted (reverses a same-day experiment) | M7 |
+| ADR-015 – ADR-030 | Decisions of 19–20 Nov (assistant cards, assistant log, pass refund rules, seat return, idempotency, course guides, payment matching, secrets, rate limits, agent coupons, clean-up) | See [PROJECT-OVERVIEW.md §8](PROJECT-OVERVIEW.md#8-decision-log-adr-015-onwards) | M2–M8 |
 
 ---
 
 ## ADR-000 — Methodology reaffirmation (9 October 2026)
 
-- **Date, status & scope:** documented 2026-11-20 (not backdated). Status: **to be completed by the author**. Scope: whole project, M1–M8.
-- **What must be stated here (author):** whether the approach was *reaffirmed* or *changed* by 9 October 2026, 11:59 PM IST, and any mentor approval reference.
-- **Evidence available from the repository** (for the author to confirm or correct):
-  - Before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct, ADR-004).
-  - After 9 Oct the same architecture was extended, not replaced: Razorpay test mode added through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–19 Nov).
-- **If changed,** fill in: old approach → new evidence → alternatives → selected approach → impact on milestones/tests → revised plan.
-
+- **Date, status & scope:** documented 2026-11-20 (not backdated). Status: **Reaffirmed** (author's statement). Scope: whole project, M1–M8. *Mentor approval reference: author to add, if there is one.*
+- **Approach (author):** from the start the plan was to build a **provider-neutral system of orders, entitlements, projections and decisions**: orders and payments from any provider become the same internal events; an append-only ledger records them; a projection turns the ledger into current entitlements; a decision engine answers "may this user open this now?". The stack chosen for it: **Node.js (Express)** on the server, **PostgreSQL** as the store, and **server-rendered HTML with htmx** for the interface (no front-end build step).
+- **Why this approach and stack:** provider neutrality and access derived from history are what the brief asks for (M1–M3), so they had to be the core rather than an add-on. Node/Express keeps the server small and close to the provider SDKs and webhooks; PostgreSQL gives transactions, unique constraints and triggers to enforce idempotency and append-only rules in the database itself (ADR-003); htmx lets pages update in place (cards, polling, partial refreshes) with plain server-rendered HTML.
+- **Evidence from the repository:** before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct). After 9 Oct the same architecture was extended, not replaced: Razorpay test mode added through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–20 Nov).
+- **Consequences:** every later milestone plugs into the same core (adapters feed the ledger; seats, passes, refunds and agent purchases are events; access is always computed), which is why the core never had to be rewritten.
 ---
 
 ## ADR-001 — Isolate payment providers behind an adapter contract
@@ -67,7 +66,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Options considered:** keep in memory (fast, no persistence); a document store (flexible, weaker constraints); **PostgreSQL** (transactions, unique indexes, triggers).
 - **Decision & rationale:** PostgreSQL behind a store interface, so the same domain code runs on both stores. Constraints (unique event id, one reversal per event, append-only trigger) are enforced in the database as well as in code.
 - **Consequences & trade-offs:** + durability and database-level guarantees; + two stores keep a quick test path. − Requires a running Postgres for most checks; `db/schema.sql` must be re-applied after updates (`npm run db:init`).
-- **Evidence & validation:** `src/domain/verify.js` (memory) and `verify-pg.js` (Postgres) both pass.
+- **Evidence & validation:** `test/verify-domain-memory.js` (memory) and `test/verify-domain-pg.js` (Postgres) both pass.
 - **Revisit trigger:** a deployment target where PostgreSQL is not available.
 
 ## ADR-004 — Webhook inbox with provider-event-id deduplication
@@ -95,7 +94,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-006 — Refunds change access only on the provider's webhook
 
-- **Date, status & scope:** 2026-11-12 (b020c80). Accepted. Components: refund routes, `webhookProcessor.js`, `src/services/refundStatus.js`.
+- **Date, status & scope:** 2026-11-12 (b020c80). Accepted. Components: refund routes, `webhookProcessor.js`, `src/services/refunds.js` (the one place a refund is requested), `src/services/refundStatus.js`.
 - **Context & drivers:** a refund request can be accepted by the provider and still fail later (`refund.failed`). Removing access at request time could leave a user without access and without money back.
 - **Options considered:** remove access when the refund API call succeeds (immediate, but wrong if the refund later fails); **keep access until the provider confirms by webhook** ("Refund pending").
 - **Decision & rationale:** the second option. The order is marked `REFUND_PENDING`; the ledger `REFUND` is appended only when the provider's refund webhook arrives; a later `refund.failed` marks the order `REFUND_FAILED` for admin review. A refund covers the whole order for the amount actually paid (after coupons).
@@ -105,7 +104,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-007 — Reconciliation repairs by replaying through the webhook pipeline
 
-- **Date, status & scope:** 2026-11-12 (de14f79); auto-acknowledge and pending-order expiry added 2026-11-19 (uncommitted). Accepted. Component: `src/payment/reconcile.js`, tables `recon_runs`, `recon_issues`.
+- **Date, status & scope:** 2026-11-12 (de14f79); auto-acknowledge and pending-order expiry added 2026-11-19 (4cc86c0); `PAYMENT_REFUSED` escalation added 2026-11-20 (1c53ec8). Accepted. Component: `src/payment/reconcile.js`, tables `recon_runs`, `recon_issues`.
 - **Context & drivers:** M6 requires detecting disagreement between provider-side and internal state, then repairing or escalating it safely. Webhooks can be lost entirely.
 - **Options considered:**
   1. Write directly to the ledger when a mismatch is found (a second write path with its own bugs).
@@ -120,7 +119,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 - **Date, status & scope:** mock 2026-10-03 (7e58a48); Razorpay test mode 2026-10-27 (a3504b5); failure switches 2026-11-14. Accepted. Components: `mock-provider/`, `src/payment/adapters/`.
 - **Context & drivers:** the brief allows sandboxes or local mocks only, with no real money. M8 requires injecting provider failures, which a real sandbox does not let you do on demand.
-- **Options considered:** Razorpay test mode only (realistic, but failures cannot be injected); a mock only (full control, but unrealistic); Stripe test mode (similar capabilities; not used — *author: add the reason Razorpay was preferred*); **both Razorpay test mode and a mock**.
+- **Options considered:** Razorpay test mode only (realistic, but failures cannot be injected); a mock only (full control, but unrealistic); Stripe test mode (similar capabilities; not used: the author could not get a Stripe account to start testing at no cost, while Razorpay gives a free, self-serve test-mode account immediately, with test cards and webhooks, so the app could be tested end to end without any cost); **both Razorpay test mode and a mock**.
 - **Decision & rationale:** both. Razorpay proves the adapter against a real sandbox (signatures, retries, refunds). The mock has switches for duplicate, delay, reorder, drop and refund-HTTP-500, re-sends after 5xx (5 s, 15 s, 45 s), and keeps provider-side records for reconciliation.
 - **Consequences & trade-offs:** + every failure mode in M2/M8 is reproducible; + no credentials are needed for the main demo. − The mock is extra code to maintain; − Razorpay test mode accepts only domestic test cards (5267 3181 8797 5449) and does not support card mandates (ADR-014).
 - **Evidence & validation:** README "Failure switches"; E2E W1–W4, A20; `npm run verify:failures` (duplicate and delay automated).
@@ -128,7 +127,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-009 — Subscriptions as stacked paid periods with manual renewal
 
-- **Date, status & scope:** 2026-11-12 (03c9938); refund and renewal rules revised 2026-11-20 (uncommitted). Accepted. Component: `src/services/subscriptions.js`.
+- **Date, status & scope:** 2026-11-12 (03c9938); refund and renewal rules revised 2026-11-20 (4cc86c0, see ADR-019 in PROJECT-OVERVIEW.md). Accepted. Component: `src/services/subscriptions.js`.
 - **Context & drivers:** M4 needs a subscription lifecycle with clear conflict and expiry semantics. Automatic recurring debit is not available in the sandbox (ADR-014).
 - **Options considered:** a single subscription row with a mutable end date (simple, but no history and refunds are ambiguous); provider-managed subscriptions (needs mandates, not available); **each paid period is its own ledger-backed period, stacked after the current one; renewal is a normal checkout**.
 - **Decision & rationale:** stacked periods. Renew while active starts the next period at the current end (`SUBSCRIPTION_RENEWED`); one renewal at a time; Cancel renewal refunds a renewal already paid in advance; Refund refunds every live paid period (one provider refund per payment) and then ends the admin/scholarship periods of that pass (`MANUAL_REVOKE`, source `SYSTEM`). Expiry is computed from the period end time.
@@ -158,7 +157,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-012 — AP2-inspired signed one-time approval instead of full AP2
 
-- **Date, status & scope:** 2026-11-15 (first version), hardened 2026-11-19 (7dd197d and uncommitted). Accepted. Components: `src/services/agentPurchase.js`, `src/services/agentKeys.js`, tables `purchase_intents`, `intent_events`, `agent_keys`.
+- **Date, status & scope:** 2026-11-15 (first version), hardened 2026-11-19 (7dd197d, 4cc86c0); coupons pinned in the approval 2026-11-20 (1c53ec8). Accepted. Components: `src/services/agentPurchase.js`, `src/services/agentKeys.js`, tables `purchase_intents`, `intent_events`, `agent_keys`.
 - **Context & drivers:** M7 requires a sandbox flow where an agent proposes, the user explicitly approves, the approved item/merchant/amount is preserved, and tampered, replayed, expired or cancelled authorizations are rejected. The brief makes an adapter "such as AP2" optional and forbids coupling the core ledger to it.
 - **Options considered:**
   1. Full AP2 (mandates as verifiable credentials): closest to the emerging standard, but needs a compatible wallet and payment network that is not available in a sandbox.
@@ -171,7 +170,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-013 — LLM assistant as an untrusted agent (Groq, no approve tool)
 
-- **Date, status & scope:** 2026-11-19 (uncommitted at the time of writing). Accepted. Components: `src/services/assistant.js`, `src/routes/agent.js`, tables `assistant_messages`, `assistant_log`.
+- **Date, status & scope:** 2026-11-19 (4cc86c0). Accepted. Components: `src/services/assistant.js`, `src/routes/agent.js`, tables `assistant_messages`, `assistant_log`.
 - **Context & drivers:** the agent flow needs a real agent for the demo, but a language model can be wrong, rate-limited or prompt-injected.
 - **Options considered:** a scripted "simulated agent" (deterministic, but not a real agent; built first, then removed 2026-11-19); a hosted model with full API access (convenient, unsafe); **a hosted model limited to a small set of server-side tools, with every safety rule enforced by the server**.
 - **Decision & rationale:** the last option. Groq's OpenAI-compatible API (`openai/gpt-oss-120b`; Gemini or any compatible endpoint as fallback). Tools: `list_courses`, `list_my_requests`, `propose_purchase`, `check_request`, `execute_purchase`; **there is no approve tool**. Purchase cards are drawn by the server from the database state, not from model text. Guardrails: 30 messages per user per day, 6 model calls per message, 1000 characters, argument validation, and course text treated as data. Every turn is written to the append-only `assistant_log`.
@@ -181,7 +180,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 ## ADR-014 — Agent pays through checkout; saved-card mandates removed
 
-- **Date, status & scope:** tried and removed 2026-11-19 (not committed). Accepted. Component: agent payment step.
+- **Date, status & scope:** tried and removed 2026-11-19 (the removal is part of 4cc86c0). Accepted. Component: agent payment step.
 - **Context & drivers:** for a fully agent-completed purchase, the agent would ideally charge a saved card with no checkout page.
 - **Options considered:** **Razorpay card mandate** (registration link + server-side recurring payment): built; **checkout per purchase** for the approved amount: the existing path.
 - **Decision & rationale:** checkout per purchase. The mandate path was built and removed the same day because card mandates do not work on the Razorpay test account (the domestic recurring test card failed with `SERVER_ERROR`, international cards are disabled, and the standard test card is not eligible for recurring). The approved amount is fixed in the Razorpay order, so the user still cannot pay a different price.

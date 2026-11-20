@@ -10,13 +10,12 @@
 const router = require('express').Router();
 const { requireAuth } = require('../auth');
 const { requireAdmin } = require('./admin');
-const { layout, esc } = require('../views');
+const { layout, esc, when } = require('../views');
 const docs = require('../services/courseDocs');
 const { renderMarkdown } = require('../services/markdown');
 
 const courses = (catalog) => catalog.list().filter((p) => (p.type || 'COURSE') === 'COURSE');
 const findCourse = (catalog, key) => courses(catalog).find((p) => p.id === key || p.slug === key) || null;
-const when = (t) => (t ? new Date(t).toLocaleString() : '-');
 
 // ---- admin ------------------------------------------------------------------------------------
 router.get('/admin/content', requireAdmin, async (req, res, next) => {

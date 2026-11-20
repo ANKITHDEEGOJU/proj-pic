@@ -4,14 +4,14 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
-const { layout, esc } = require('../views');
+const { layout, esc, money: amount, when } = require('../views');
 const { PaymentService } = require('../payment/service');
 const seats = require('../services/seats');
 const checkoutOnce = require('../services/checkoutOnce');
 const { randomUUID } = require('node:crypto');
 
-const money = (cents, cur = 'USD') => `$${(Number(cents) / 100).toFixed(2)} ${esc(cur)}`;
-const when = (t) => (t ? new Date(t).toLocaleString() : '-');
+// Seat prices are shown with a $ sign, like the course cards.
+const money = (cents, cur = 'USD') => `$${amount(cents, cur)}`;
 const err = (msg) => `<span class="err">${esc(msg)}</span>`;
 
 // Only the organization's owner (the buyer) or a platform admin may manage it.
@@ -69,11 +69,19 @@ function buyForm(catalog, { needsName }) {
 // A pack whose checkout was cancelled, failed or never paid: one muted line, nothing charged.
 // (The pack row stays PENDING_PAYMENT: a payment that still arrives later activates it.)
 const UNPAID = { CANCELLED: 'Payment cancelled', FAILED: 'Payment failed', EXPIRED: 'Not paid in time' };
+// An unpaid checkout is only a short notice: shown for ORG_UNPAID_SHOW_SECONDS after it ended
+// (default 120), and on the page it fades out after ORG_NOTICE_FADE_MS (default 6000). The pack row
+// itself stays, so a payment that still arrives later activates it and it shows as a normal pack.
+const num = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v >= 0 ? v : dflt; };
+const UNPAID_SHOW_MS = () => num('ORG_UNPAID_SHOW_SECONDS', 120) * 1000;
+const NOTICE_FADE_MS = () => num('ORG_NOTICE_FADE_MS', 6000);
+const isUnpaid = (p) => p.status === 'PENDING_PAYMENT' && Boolean(UNPAID[p.order_status]);
+const recentlyEnded = (p) => Date.now() - new Date(p.order_updated_at || p.created_at).getTime() < UNPAID_SHOW_MS();
 
 function poolCard(p, course) {
-  if (p.status === 'PENDING_PAYMENT' && UNPAID[p.order_status]) {
+  if (isUnpaid(p)) {
     return `
-  <div class="card" style="margin-bottom:1rem;opacity:0.7;padding:0.6rem 1rem">
+  <div class="card org-notice" style="margin-bottom:1rem;opacity:0.7;padding:0.6rem 1rem">
     <small>${esc(course?.name || p.course_id)} · ${p.seats} seats · ${money(p.final_payable_cents)} via ${esc(p.provider)} · ${when(p.created_at)} ·
       <span class="err">${UNPAID[p.order_status]}</span>. Nothing was charged.</small>
   </div>`;
@@ -131,8 +139,19 @@ const CHECKOUT_NOTES = {
 };
 const checkoutNote = (req) => {
   const n = CHECKOUT_NOTES[req.query.checkout];
-  return n ? `<div class="card" style="border-left:4px solid ${n[0] === 'ok' ? '#2e7d32' : '#c62828'}"><p class="${n[0]}" style="margin:0">${n[1]}</p></div>` : '';
+  return n ? `<div class="card org-notice" style="border-left:4px solid ${n[0] === 'ok' ? '#2e7d32' : '#c62828'}"><p class="${n[0]}" style="margin:0">${n[1]}</p></div>` : '';
 };
+
+// Notices (checkout result, unpaid checkout lines) fade out and collapse after a few seconds;
+// the ?checkout=... note is also taken out of the address bar so a reload doesn't repeat it.
+const noticeScript = () => `<style>.org-notice{transition:opacity .6s ease,max-height .6s ease,margin .6s ease,padding .6s ease;overflow:hidden;max-height:20rem}
+  .org-notice.gone{opacity:0!important;max-height:0;margin:0!important;padding-top:0!important;padding-bottom:0!important;border-width:0}</style>
+<script>(function(){
+  if (location.search.indexOf('checkout=') !== -1 && history.replaceState) history.replaceState(null, '', location.pathname);
+  setTimeout(function(){
+    document.querySelectorAll('.org-notice').forEach(function(el){ el.classList.add('gone'); setTimeout(function(){ el.remove(); }, 650); });
+  }, ${NOTICE_FADE_MS()});
+})();</script>`;
 
 async function renderOrgPage(req, res, org) {
   const { catalog } = req.app.locals.engine;
@@ -144,17 +163,18 @@ async function renderOrgPage(req, res, org) {
         <h3>Buy seats for your team</h3>
         <p style="color:#5B5F6E;margin-bottom:1rem">Create an organization and buy seats for a course. You can then give each seat to a teammate by email, take it back, or move it to someone else.</p>
         ${buyForm(catalog, { needsName: true })}
-      </div>`;
+      </div>${noticeScript()}`;
     return res.send(layout('Organization', body, req.user));
   }
   const pools = await seats.listPools(org.id);
+  const shown = pools.filter((p) => !isUnpaid(p) || recentlyEnded(p)); // old unpaid checkouts: not listed
   const isOwner = org.owner_user_id === req.user.id;
   const body = `
     <h2>${esc(org.name)}</h2>
     ${checkoutNote(req)}
     ${!isOwner ? '<p class="msg">You are viewing this organization as a platform admin.</p>' : ''}
-    ${pools.map((p) => poolCard(p, catalog.get(p.course_id))).join('') || '<p>No seat packs yet.</p>'}
-    ${isOwner ? `<div class="card"><h3>Buy more seats</h3>${buyForm(catalog, { needsName: false })}</div>` : ''}`;
+    ${shown.map((p) => poolCard(p, catalog.get(p.course_id))).join('') || '<p>No seat packs yet.</p>'}
+    ${isOwner ? `<div class="card"><h3>Buy more seats</h3>${buyForm(catalog, { needsName: false })}</div>` : ''}${noticeScript()}`;
   res.send(layout('Organization', body, req.user));
 }
 
@@ -187,8 +207,7 @@ router.post('/org/seats/checkout', requireAuth, async (req, res) => {
     const out = await seats.createSeatPackOrder({ userId: req.user.id, orgName: b.orgName, course, seats: b.seats, provider, checkoutKey });
     if (out.repeated) {
       // Same form submitted again (double click / retry): back to the first order's checkout.
-      const again = await checkoutOnce.repeatAnswer(out.repeated);
-      return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(err(again.message));
+      return checkoutOnce.sendRepeat(res, out.repeated, err);
     }
     const { redirectUrl } = await new PaymentService({ catalog }).initiatePayment({
       userId: req.user.id,

@@ -1,3 +1,5 @@
+'use strict';
+
 const router = require("express").Router();
 const { randomUUID } = require("node:crypto");
 const { requireAuth } = require("../auth");
@@ -40,7 +42,7 @@ router.post("/api/dev/events", requireAuth, async (req, res) => {
         productId: b.productId,
         quantity,
         amount: b.amount ?? (product ? product.price * quantity : 0),
-        currency: b.currency || product?.currency || "INR",
+        currency: b.currency || product?.currency || "USD",
         occurredAt: new Date().toISOString(),
         referenceeventId: b.referenceeventId ?? null,
         source: b.source,

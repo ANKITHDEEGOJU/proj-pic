@@ -1,3 +1,5 @@
+'use strict';
+
 const pool = require('../db');
 
 /**
@@ -243,7 +245,6 @@ async function validateCoupon(code, user, isSubscriptionCart, cartItems = []) {
   // Floor constraint: Discount cannot exceed eligible subtotal
 discountCents = Math.min(discountCents, eligibleSubtotalCents);
 const finalPayableCents = subtotalCents - discountCents;
-//console.log(finalPayableCents,subtotalCents,discountCents)
 return {
     valid: true,
     rule,

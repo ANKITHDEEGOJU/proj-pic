@@ -3,23 +3,8 @@
 const router = require('express').Router();
 const { randomUUID } = require('node:crypto');
 const pool = require('../db');
-const { layout, esc, moreRow, searchBox, qs, PAGE_SIZE } = require('../views');
+const { layout, esc, moreRow, searchBox, qs, PAGE_SIZE, when } = require('../views');
 const { getRuleStatus } = require('../services/pricingEngine');
-
-// Helper to look up catalog item by id or slug safely
-function resolveCatalogProduct(catalog, key) {
-  if (!catalog || !key) return null;
-  if (typeof catalog.get === 'function') {
-    const item = catalog.get(key);
-    if (item) return item;
-  }
-  if (typeof catalog.list === 'function') {
-    for (const item of catalog.list()) {
-      if (item.id === key || item.slug === key) return item;
-    }
-  }
-  return null;
-}
 
 /**
  * Gatekeeper Middleware: Restricts access to admin users matching ADMIN_EMAIL
@@ -125,7 +110,7 @@ async function adminUserRows(engine, { q = '', offset = 0 } = {}) {
 
       const entitlementBadges = userEntitlements.length > 0
         ? userEntitlements.map(ent => {
-            const p = resolveCatalogProduct(catalog, ent.productId);
+            const p = catalog.get(ent.productId);
             const title = p ? (p.name || p.title) : ent.productId;
             const isSub = ent.type === 'SUBSCRIPTION';
 
@@ -233,7 +218,7 @@ router.post('/admin/users/grant', requireAdmin, async (req, res) => {
   }
 
   try {
-    const product = resolveCatalogProduct(catalog, productId);
+    const product = catalog.get(productId);
     if (!product) {
       return res.status(404).send('Product not found in catalog');
     }
@@ -290,7 +275,7 @@ router.post('/admin/users/revoke', requireAdmin, async (req, res) => {
   }
 
   try {
-    const product = resolveCatalogProduct(catalog, productId);
+    const product = catalog.get(productId);
     const targetProductId = product ? (product.slug || product.id) : productId;
 
     // Retrieve active entitlement from projection engine
@@ -590,7 +575,6 @@ router.post('/admin/pricing-rules/:id/toggle', requireAdmin, async (req, res) =>
 // ---------------------------------------------------------------------------
 // M6 Reconciliation + M2 webhook inbox health
 // ---------------------------------------------------------------------------
-const fmtTime = (t) => (t ? new Date(t).toLocaleString() : '-');
 const smallBtn = 'style="padding: 0.3rem 0.6rem; font-size: 0.8rem;"';
 
 // Reconciliation page tables: PAGE_SIZE rows each, "Show more" fetches the next page.
@@ -603,7 +587,7 @@ const RECON_TABLES = {
       <tr><td><strong>${esc(i.kind)}</strong><br><small>${esc(i.provider || '')}</small></td>
         <td><code>${esc(i.ref)}</code>${i.order_id ? `<br><small>order ${esc(i.order_id)}</small>` : ''}</td>
         <td>${reconDetails(i.details)}</td>
-        <td><small>first ${fmtTime(i.first_seen_at)}<br>last ${fmtTime(i.last_seen_at)}</small></td>
+        <td><small>first ${when(i.first_seen_at)}<br>last ${when(i.last_seen_at)}</small></td>
         <td><form hx-post="/admin/reconciliation/issues/${i.id}/resolve" hx-swap="none" hx-on::after-request="location.reload()">
           <button class="alt" type="submit" ${smallBtn}>Resolve</button></form></td></tr>`,
   },
@@ -612,14 +596,14 @@ const RECON_TABLES = {
     where: "status='AUTO_FIXED'", from: 'recon_issues', order: 'id DESC',
     row: (i) => `
       <tr><td><strong>${esc(i.kind)}</strong></td><td><code>${esc(i.ref)}</code></td>
-        <td>${reconDetails(i.details)}</td><td><small>${fmtTime(i.first_seen_at)} (run #${i.first_run_id})</small></td></tr>`,
+        <td>${reconDetails(i.details)}</td><td><small>${when(i.first_seen_at)} (run #${i.first_run_id})</small></td></tr>`,
   },
   inbox: {
     cols: 7,
     where: "status IN ('FAILED','DEAD','PROCESSING')", from: 'webhook_inbox', order: 'received_at DESC, id DESC',
     row: (w) => `
       <tr><td>#${w.id}</td><td>${esc(w.provider)}<br><code>${esc(w.provider_event_id)}</code></td>
-        <td>${esc(w.status)}</td><td>${w.attempts}</td><td><small>${fmtTime(w.next_retry_at)}</small></td>
+        <td>${esc(w.status)}</td><td>${w.attempts}</td><td><small>${when(w.next_retry_at)}</small></td>
         <td><small>${esc(w.failure_reason || '')}</small></td>
         <td>${['DEAD', 'FAILED'].includes(w.status) ? `<form hx-post="/admin/webhooks/${w.id}/retry" hx-swap="none" hx-on::after-request="location.reload()">
           <button class="alt" type="submit" ${smallBtn}>Retry now</button></form>` : ''}</td></tr>`,
@@ -628,8 +612,8 @@ const RECON_TABLES = {
     cols: 5,
     where: 'TRUE', from: 'recon_runs', order: 'id DESC',
     row: (r) => `
-      <tr><td>#${r.id}</td><td>${esc(r.trigger)}</td><td>${fmtTime(r.started_at)}</td>
-        <td>${r.finished_at ? fmtTime(r.finished_at) : '<span style="color:#d29922">running…</span>'}</td>
+      <tr><td>#${r.id}</td><td>${esc(r.trigger)}</td><td>${when(r.started_at)}</td>
+        <td>${r.finished_at ? when(r.finished_at) : '<span style="color:#d29922">running…</span>'}</td>
         <td>${r.error ? `<span class="err">${esc(r.error)}</span>` : reconDetails(r.summary)}</td></tr>`,
   },
 };

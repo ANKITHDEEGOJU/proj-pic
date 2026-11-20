@@ -47,4 +47,11 @@ async function repeatAnswer(order, { waitMs = 8000 } = {}) {
   }
 }
 
-module.exports = { validKey, claim, find, rememberUrl, repeatAnswer };
+// Answers a repeated submit over htmx: redirect to the same checkout page, or show the message
+// (renderError turns the plain message into the page's error markup).
+async function sendRepeat(res, order, renderError) {
+  const again = await repeatAnswer(order);
+  return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(renderError(again.message));
+}
+
+module.exports = { validKey, claim, find, rememberUrl, repeatAnswer, sendRepeat };
