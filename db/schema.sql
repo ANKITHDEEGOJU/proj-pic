@@ -410,3 +410,76 @@ CREATE TABLE IF NOT EXISTS intent_events (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_intent_events_ref ON intent_events (intent_ref, id);
+-- The provider's checkout link for an executed request that is paid on a checkout page
+-- (Razorpay), so the purchase card can always show its Pay button.
+ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS pay_url TEXT;
+
+-- -----------------------------------------------------------------------------
+-- M7: LEARNX Assistant, an AI agent (Groq / Gemini) inside the app
+-- -----------------------------------------------------------------------------
+-- One chat thread per user. Each row is one message in the OpenAI chat format (user,
+-- assistant with tool calls, or tool result), so the model gets its own history back.
+-- Approval tokens are never stored here: the assistant's tools use them on the server.
+CREATE TABLE IF NOT EXISTS assistant_messages (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    UUID NOT NULL REFERENCES users(id),
+  message    JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_assistant_messages_user ON assistant_messages (user_id, id);
+
+-- Assistant log (admin monitoring). One row per chat turn: what the user typed, the reply,
+-- the tools used, which model answered, tokens, time taken and any error (including limit
+-- errors and model failures, which are not kept in assistant_messages). Clear chat does not
+-- touch it. Rows are never updated; they are deleted only by the retention purge
+-- (ASSISTANT_LOG_DAYS), which sets learnx.assistant_log_purge for its own transaction.
+CREATE TABLE IF NOT EXISTS assistant_log (
+  id                BIGSERIAL PRIMARY KEY,
+  user_id           UUID NOT NULL REFERENCES users(id),
+  user_email        TEXT,
+  ip                TEXT,
+  status            TEXT NOT NULL CHECK (status IN ('OK','ERROR')),
+  error_code        TEXT,
+  error_message     TEXT,
+  user_message      TEXT NOT NULL,
+  reply             TEXT,
+  raw_reply         TEXT,            -- the model's own text when the app replaced it
+  tools             JSONB NOT NULL DEFAULT '[]',
+  flags             TEXT[] NOT NULL DEFAULT '{}',
+  provider          TEXT,
+  model_calls       INT NOT NULL DEFAULT 0,
+  prompt_tokens     INT NOT NULL DEFAULT 0,
+  completion_tokens INT NOT NULL DEFAULT 0,
+  duration_ms       INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_assistant_log_created ON assistant_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_assistant_log_user ON assistant_log (user_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION assistant_log_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND current_setting('learnx.assistant_log_purge', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'assistant_log is append-only';
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_assistant_log_guard ON assistant_log;
+CREATE TRIGGER trg_assistant_log_guard BEFORE UPDATE OR DELETE ON assistant_log
+  FOR EACH ROW EXECUTE FUNCTION assistant_log_guard();
+DROP TRIGGER IF EXISTS trg_assistant_log_no_truncate ON assistant_log;
+CREATE TRIGGER trg_assistant_log_no_truncate BEFORE TRUNCATE ON assistant_log
+  FOR EACH STATEMENT EXECUTE FUNCTION assistant_log_guard();
+
+-- Subscription refunds (2026-11-20): which kind of pass refund claimed this order.
+--   PASS_FULL      - Refund: every paid period of the current pass; when all are refunded the
+--                    free (admin / scholarship) periods of the pass end too.
+--   RENEWAL_CANCEL - Cancel renewal: a renewal paid in advance, refunded in full.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_scope TEXT;
+
+-- One order per checkout click (2026-11-20): the cart / seat-pack form's one-time key and the
+-- provider checkout link, so a repeated submit returns to the same checkout instead of creating
+-- a second order (services/checkoutOnce.js).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_key TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_url TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_checkout_key ON orders (user_id, checkout_key) WHERE checkout_key IS NOT NULL;

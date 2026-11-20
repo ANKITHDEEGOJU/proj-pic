@@ -65,6 +65,11 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
   const reconMs = Number(process.env.RECON_INTERVAL_MS ?? 15 * 60_000);
   if (retryMs > 0) startInterval('retry', retryMs, () => retryDueWebhooks({ ledger: engine.ledger }));
   if (reconMs > 0) startInterval('recon', reconMs, () => app.locals.reconciler.run({ trigger: 'scheduled' }));
+  // M7: expire stale agent purchase requests, fail executed ones whose payment never completed.
+  const agentSweepMs = Number(process.env.AGENT_SWEEP_INTERVAL_MS ?? 60_000);
+  if (agentSweepMs > 0) startInterval('agent-sweep', agentSweepMs, () => require('./services/agentPurchase').sweep());
+  // Assistant log retention (ASSISTANT_LOG_DAYS, default 90; 0 keeps everything): checked hourly.
+  startInterval('assistant-log-purge', 60 * 60_000, () => require('./services/assistant').purgeLog());
 
   app.listen(port, () => console.log("LEARNX :- " + port));
 })().catch((e) => {

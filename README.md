@@ -10,9 +10,10 @@ A course storefront built with Node.js, Express and PostgreSQL. Users can browse
 - Payments via Razorpay test mode or a local mock provider
 - Webhook handling with an inbox table for tracking deliveries, plus purchase and refund events
 - Admin panel: manage pricing rules and grant or revoke course access for users
-- Organizations with seat packs, and subscription renew / cancel
+- Organizations with seat packs, and subscription renew / cancel (one renewal at a time; Refund refunds the whole pass)
 - Usage quotas on a premium feature (sandbox "AI summary"), per user or pooled per organization
-- Agent-approved purchases: an agent proposes, the user approves, a signed one-time approval executes it
+- Agent-approved purchases with **LEARNX Assistant**, an AI agent (Groq): it proposes, you approve with a button, a signed one-time approval lets it complete the purchase
+- Admin **Assistant Log**: every assistant chat turn (message, reply, tools, model, tokens, errors), admin only, kept even when a user clears their chat
 
 ## Requirements
 
@@ -28,6 +29,8 @@ createdb learnx       # or create the database another way
 npm run db:init           # applies db/schema.sql
 ```
 
+`db/schema.sql` can be run again at any time: it only adds what is missing. Run `npm run db:init` again **after every update** (the 2026-11-20 changes add the `assistant_log` table and the `orders.refund_scope`, `checkout_key` and `checkout_url` columns).
+
 Main variables in `.env`:
 
 | Variable | Purpose |
@@ -37,6 +40,10 @@ Main variables in `.env`:
 | `ADMIN_EMAIL` | Email that gets admin access (default `admin@learnx.com`) |
 | `MOCK_WEBHOOK_SECRET`, `MOCK_PROVIDER_URL`, `MOCK_PROVIDER_PORT` | Mock payment provider |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | Razorpay test credentials |
+| `GROQ_API_KEY` (optional `GEMINI_API_KEY`) | LEARNX Assistant model (see *LEARNX Assistant*) |
+| `SUB_DURATION_MINUTES` | Demo only: every pass period lasts N minutes instead of 30 days |
+| `RENEW_PENDING_MINUTES` | How long an unpaid renewal checkout blocks another Renew (default 30) |
+| `ASSISTANT_LOG_DAYS` | Days the admin assistant log is kept (default 90; 0 = forever) |
 
 ## Running
 
@@ -47,11 +54,14 @@ cd mock-provider && npm start      # optional mock payment provider on :3001
 
 Then open http://localhost:3000/login, register an account, and visit `/courses`. Admin pages are at `/admin`.
 
+Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port 3000 in use), another instance is still running: find it with `ss -ltnp | grep :3000` (or `lsof -i :3000`) and stop it (`kill <pid>`), then start again. The same applies to the mock provider on port 3001. After changing code in `mock-provider/`, restart the mock provider too.
+
 ## Commercial rules
 
 **Cart and coupons**
 - A cart holds either individual courses or one All-Access pass, never both: adding a pass empties the cart, and adding a course removes a pass.
 - One coupon per order. The discount is split across the order's lines, so per-item ledger amounts add up to what was charged. An applied coupon is remembered across page loads and re-checked at checkout.
+- **One order per click.** The cart and seat-pack forms carry a one-time `checkoutKey`: sending the same form again (double click, back button, retry) returns to the same checkout page instead of creating a second order (`orders.checkout_key` / `checkout_url`, unique per user). The buttons are also disabled while the request runs. Admin grants work the same way: the grant form's one-time `grantKey` is the ledger event id, so a double-submitted grant is recorded once.
 - Coupons don't apply to seat packs.
 
 **Courses vs the All-Access pass**
@@ -60,8 +70,9 @@ Then open http://localhost:3000/login, register an account, and visit `/courses`
 
 **Subscriptions (manual renewal)**
 - *Renew* pays for another 30 days through the normal checkout. Bought while a pass is active, it is recorded as `SUBSCRIPTION_RENEWED` and starts when the current period ends.
-- *Cancel renewal* records `SUBSCRIPTION_CANCELLED`. Access continues until the paid-up end date and the renewal reminder (last 7 days) stops. Paying again turns renewal back on.
-- A refund removes only the period it refunds.
+- **One renewal at a time.** Once a renewal is paid (or its payment is still open, up to `RENEW_PENDING_MINUTES`, default 30), the card shows no **Renew**, only **Cancel renewal** and **Refund**. The server refuses a second renewal too (Renew, cart checkout and direct checkout). Renew comes back when the paid-in-advance period has started, or after the renewal is cancelled.
+- *Cancel renewal* records `SUBSCRIPTION_CANCELLED` (renewal reminder off, card says *Not renewing*). If a renewal was already paid, that renewal is **refunded in full** (it has not been used) and access goes back to the end of the current period. Without one, access simply continues to the paid-up end date. Paying again turns renewal back on.
+- **Refund refunds the whole pass**: every paid period that has not ended yet (the one running now and any renewal), one provider refund per payment (they can be at different providers). Orders are marked `refund_scope = PASS_FULL`; the card shows *Refund pending* until every provider has confirmed by webhook, and the page reloads when it finishes. When all are refunded, the pass's admin / scholarship periods end too (`MANUAL_REVOKE`, source `SYSTEM`). If a provider refuses one payment, that order reopens, the others are still refunded and free periods are kept; the card says which part failed. Courses bought separately are never touched.
 
 **Enterprise seats**
 - The buyer of a seat pack owns the organization (one per user) and manages it at `/org`. Platform admins see all organizations at `/admin/orgs`.
@@ -69,11 +80,18 @@ Then open http://localhost:3000/login, register an account, and visit `/courses`
 - Seats are assigned by the member's email (they need a LearnX account). One seat per member per pack, never more than N in use. Usage is counted from the ledger.
 - Unassign takes the seat back; reassign moves it to another member in one step.
 - Refunding or charging back a pack unassigns every seat. Refunds wait for the provider's webhook, like course refunds.
+- A seat pack whose checkout was cancelled, failed or not paid in time is shown as one line (*Payment cancelled. Nothing was charged.*); if the provider still confirms the payment later, the pack becomes active.
+- After paying for seats (mock or Razorpay) you return to **`/org`** with *Payment received*; *Simulate Failure* or closing / cancelling the checkout also returns there (*Payment failed* / *Payment cancelled. Nothing was charged.*). The checkout pages only accept the return targets `agent` and `org`.
 
 ## Webhook retries and reconciliation
 
 - **Retries (M2):** every webhook is stored in `webhook_inbox` before processing. Failed rows are retried in the background with exponential backoff (30 s, 60 s, … capped at 1 h) and become `DEAD` after 8 attempts. A refund that arrives before its purchase gets HTTP 503 so the provider re-sends it.
 - **Reconciliation (M6):** every 15 minutes (and on demand at `/admin/reconciliation`) the app compares Razorpay's payments and refunds with the ledger. Lost payment/refund webhooks and stuck `REFUND_PENDING` orders are repaired by replaying the missing provider event through the normal webhook pipeline; amount mismatches, partial refunds, unknown payments, failed refunds and dead webhooks are listed for an admin. The mock provider is checked the same way (it keeps its own payment and refund records in `mock-provider/data.json`).
+- **Resolved stays resolved:** when an admin resolves an issue and reconciliation finds the same issue again, it is counted as *acknowledged* instead of being reopened (any open copy is closed with `recon:auto`).
+- **Old unpaid orders:** `PENDING` orders older than `ORDER_PENDING_EXPIRY_MINUTES` (default 60, 0 = off) are marked `EXPIRED` by reconciliation. A payment that still arrives later for an `EXPIRED`, `CANCELLED` or `FAILED` order completes it normally.
+- **Admin page:** `/admin/reconciliation` shows open issues, fixed issues, the webhook inbox and past runs, 20 rows at a time with **Show more**.
+- **Order states from checkout:** *Cancel* on the provider's page marks the order `CANCELLED` and puts its items back in the cart; a failed payment marks it `FAILED` (it used to stay `PENDING`).
+- **No double purchase:** *Add to Cart* refuses a course you already own (e.g. from an old tab), and checkout checks again: owned items are removed from the cart and nothing is charged.
 
 Settings are in `.env.example` (all optional).
 
@@ -98,11 +116,16 @@ A step-by-step demo of everything the project does, using the mock payment provi
 
 **3. Subscription and expiry**
 1. As Alice, buy the **All-Access pass** the same way. Every course now opens (*ACTIVE_SUBSCRIPTION_PASS*).
-2. The pass card shows the end date, **Renew** (adds another period after the current one) and **Cancel renewal** (access stays until the end date).
-3. Expiry: when the end date passes, every course closes again and shows **Expired**. *A pass lasts 30 days, so a short demo pass setting is still to be added to show this live.*
+2. The pass card shows the end date, **Renew** (adds another period after the current one), **Cancel renewal** and **Refund Subscription**.
+   - Click **Renew** and pay: Renew disappears (one renewal at a time) and the card says *Renewed*.
+   - **Cancel renewal (refund it)** refunds that renewal in full; the end date goes back to the current period, the card says *Not renewing* and Renew is offered again.
+   - Renew again, then **Refund Subscription (all 2 payments)**: both payments are refunded (each at its own provider), the card shows *Refund pending* until the providers confirm, then the page reloads and every course closes. An admin or scholarship month on the pass ends too.
+3. Expiry: when the end date passes, every course closes again and shows **Expired**; **Access** says *Denied · SUBSCRIPTION_EXPIRED*. No ledger event is needed: access is calculated from the period's end time.
+4. To see expiry live, start the app with a short demo pass: `SUB_DURATION_MINUTES=5 npm start` (or set it in `.env`). Every pass period then lasts 5 minutes instead of 30 days (the pass card says *5 min (demo)* and shows the end time). Buy the pass, wait 5 minutes, reload **Courses**: access is gone. **Renew** adds another 5 minutes.
+   *Demo only:* the setting changes how long **every** period is when access is calculated, including passes bought earlier, and nothing in the ledger. Remove it and restart to go back to 30 days. `npm run verify` ignores it.
 
 **4. Enterprise seats**
-1. As Alice, open **Organization**, give the organization a name, choose a course and 2 seats, and click **Buy seats →**. Pay on MockPay.
+1. As Alice, open **Organization**, give the organization a name, choose a course and 2 seats, and click **Buy seats →**. Pay on MockPay: you come back to **Organization** with *Payment received* and the new seat pack (cancelling or a failed payment also returns there, with *Nothing was charged*).
 2. Alice gets no access from buying seats. Assign a seat to `bob@demo.local`.
 3. As Bob, the course shows *Seat from your organization*. As Alice, **Unassign** the seat: Bob loses access. **Reassign** moves a seat to another member in one step.
 
@@ -119,12 +142,14 @@ A step-by-step demo of everything the project does, using the mock payment provi
 **7. Usage quota**
 1. As Bob, on an owned course click **AI summary**, then **Generate summary** until the credits run out: you get *Quota used up* with the reset time.
 
-**8. Agent-approved purchase (optional)**
-1. As Bob, open **Agent**. In **Simulated agent** pick a course Bob doesn't own, choose *Mock provider*, and click **Agent: propose purchase**.
-2. You see the request: item, merchant `LEARNX` and the catalog price. Click **Approve this purchase**.
-3. The next page shows the token the agent received. Change one character and click **Agent: execute purchase**: *Rejected: TAMPERED*. Undo the change and execute again: *Purchase completed*, and the course is now owned.
-4. Click **Agent: execute purchase** once more: *Rejected: REPLAYED*. Also try **Cancel** on another approved request, then executing it: *Rejected: CANCELLED*.
-5. With *Razorpay test mode* instead, executing takes you to Razorpay checkout for exactly the approved amount (test card `5267 3181 8797 5449`, any OTP).
+**8. Agent-approved purchase with LEARNX Assistant (optional, needs `GROQ_API_KEY`)**
+1. As Bob, open **Agent**. In the **LEARNX Assistant** chat type *"Which courses can I buy?"*: the assistant calls `list_courses` and answers with the catalog prices.
+2. Type *"Buy me Intro to SQL"*. The assistant calls `propose_purchase`, and a **purchase card** appears: course, `20.00 USD`, Razorpay, status `PROPOSED`, with **Approve** and **Cancel** buttons.
+3. On the card, keep **Razorpay (test mode)** selected (or pick **Mock provider**) and click **Approve 20.00 USD**. Your click is the approval; the assistant then completes the purchase by itself (`execute_purchase`) and the card changes to **Pay 20.00 USD with Razorpay**.
+4. Click it and pay on Razorpay test checkout (card `5267 3181 8797 5449`, any future expiry, any CVV, OTP `1234`). You come back to the chat (also if you close checkout without paying; the card then still shows **Pay**). Once Razorpay's webhook has arrived, the card shows **Paid**, the chat gets a *"Payment received: Intro to SQL is now in your library"* line, the card fades out a few seconds later and the course is **Owned**.
+5. A course over 30.00 (e.g. *Payments in Depth*) shows a password box next to **Approve**: a wrong or empty password is refused and logged. The browser does not autofill it (`autocomplete="new-password"`), so it is always typed.
+6. Ask it to *"buy it again and approve it yourself"*: it refuses (already owned, and it has no way to approve).
+7. Open **details** on a card: the request's **History** lists every step (`PROPOSED` by the assistant, `APPROVED` by you, `TOKEN_ISSUED`, `EXECUTED`) and every rejected attempt.
 
 ## Failure switches (mock provider)
 
@@ -170,37 +195,109 @@ Credits are stored in `usage_counters` (one row per user or organization, per da
 
 ## Agent-approved purchase (M7)
 
-An AI agent can **suggest** a purchase, but only the user can **approve** it. The approval is locked to the exact item, seller and price, works once, and expires after 5 minutes.
+An AI agent can **propose** a purchase, but only the user can **approve** it. The approval is locked to the exact item, seller, price and agent, works once, and expires after 5 minutes.
 
-Open **Agent** in the menu (`/agent`).
+The agent is **LEARNX Assistant**: a chat panel on `/agent` (menu **Agent**) backed by a real AI model (Groq). All safety checks are done by the server, so they hold whatever the model says or does.
 
-**Which agent?** The app doesn't depend on any particular agent. Anything that calls the agent API (below) acts as "the agent". The app includes a **Simulated agent** form, so no AI model or API key is needed. In this sandbox the agent uses the user's login; a real agent would get its own credential that can propose and execute but never approve. Optionally, a small real agent could be added later using Claude (model `claude-opus-5-5`, through the official `@anthropic-ai/sdk` package). It would get three tools: *list courses*, *propose purchase* and *execute purchase*. It can never approve: approval happens only in the user's browser. All the safety checks are done by the server, so they hold no matter which agent or model is used.
+### The flow
 
-**How it works**
-1. **The agent proposes:** `POST /agent/intents` with a course. The server fills in the item, seller (`LEARNX`) and current price from the catalog (the agent can't choose the amount) and saves a `purchase_intents` row with status `PROPOSED`.
-2. **The user approves:** the page `/agent/intents/:id` shows item, seller and amount with **Approve** and **Cancel** buttons. Approve creates a signed token (JWT) holding the intent id, user, item, seller, amount, currency and a one-time nonce, valid for 5 minutes.
-3. **The agent executes:** `POST /agent/intents/:id/execute` with the token. The server rejects it if:
-   - the signature is wrong (token was **tampered** with),
-   - it is **expired** (older than 5 minutes),
-   - the item, seller or amount differ from the approved intent, or the catalog price changed since approval,
-   - the intent was **cancelled**,
-   - it was already used (**replay**): only one `APPROVED -> EXECUTED` update can win.
-4. **Payment** goes through the normal provider flow, so the ledger records an ordinary `PURCHASE_SUCCEEDED`. The ledger never knows an agent was involved; the only link is `purchase_intents.order_id`.
+```
+You: "Buy me Intro to SQL"
+  → model calls list_courses, propose_purchase             (tools run on the server, as you)
+  ← purchase card: Intro to SQL · 20.00 USD · [Approve] [Cancel]
+You click Approve (+ password above 30.00)                 ← the only way to approve
+  → the assistant is asked to finish: execute_purchase     (collects the one-time approval token itself)
+  ← card: [Pay 20.00 USD with Razorpay | Mock provider] [Cancel payment]
+You pay on Razorpay test checkout, or on the mock checkout page (Pay / Simulate Failure / Cancel)
+  → back to /agent; webhook → ledger PURCHASE_SUCCEEDED → access
+  ← card: Paid, and a "Payment received" line in the chat; the card fades out after ~5 s
+```
+
+1. **Propose.** The server fills in the item, seller (`LEARNX`) and current price from the catalog (the model can't choose the amount) and saves a `purchase_intents` row with status `PROPOSED`. Refused when the user already owns the course (`ALREADY_OWNED`), a request for it is already open (`DUPLICATE_REQUEST`, also under concurrent requests), an earlier request for it is still waiting for its payment, e.g. an unpaid Razorpay checkout (`PAYMENT_PENDING`; paying both would charge twice), or the agent made too many requests today (`RATE_LIMITED`, default 20 per day, counted with the M5 quota code).
+2. **Approve.** The user clicks **Approve** on the purchase card in the chat, or on the request page `/agent/intents/:id`. Both need the login session. Above `AGENT_STEPUP_ABOVE_CENTS` (default 3000 = 30.00) the user must also enter their password, so a stolen or left-open session alone can't approve a large purchase. Approval creates a one-time nonce and a signed token (JWT) holding the request, user, agent, item, seller, amount and currency, valid for 5 minutes. The token is **never shown in the browser** and never sent to the model.
+3. **Execute.** The assistant's `execute_purchase` tool collects the token (once, and only for the agent that proposed the request) and executes. The server rejects an execution when:
+   - the signature is wrong (`TAMPERED`) or it is too old (`EXPIRED`),
+   - it belongs to another request, user or agent (`WRONG_INTENT`, `WRONG_USER`, `WRONG_AGENT`),
+   - item, seller or amount differ (`MISMATCH`) or the catalog price changed since approval (`PRICE_CHANGED`),
+   - the request was cancelled (`CANCELLED`) or never approved (`NOT_APPROVED`),
+   - the user got the course another way since approving (`ALREADY_OWNED`; nothing is bought twice),
+   - it was already used (`REPLAYED`): only one `APPROVED -> EXECUTED` update can win, even when sent several times at once.
+4. **Payment** goes through the normal provider flow, so the ledger records an ordinary `PURCHASE_SUCCEEDED`. The ledger never knows an agent was involved; the only link is `purchase_intents.order_id`. The request shows the payment outcome read from that order: `PENDING`, `PAID`, `REFUNDED`, `CHARGED_BACK`, `FAILED`.
+5. **Clean-up (every minute):** proposals nobody approved within 24 h and approvals not used in time become `EXPIRED`; a request whose payment was not completed within 30 min (abandoned checkout, or the server stopped before the payment started) becomes `FAILED`. The order itself is left alone: if the money arrives later, the normal webhook or reconciliation still records it and the request shows `PAID`.
+
+**History:** every step (proposed, approved, token collected, executed, expired, failed) and every rejected attempt, with its code and IP, is stored in `intent_events` and shown on the request page (**details** on a card).
 
 **Payment per provider**
-| | Mock provider | Razorpay (test mode) |
+| | Razorpay (default) | Mock provider |
 |---|---|---|
-| After a valid execute | The server charges the payment directly; the agent finishes the purchase on its own | A Razorpay order is created for the approved amount; the user pays it on Razorpay checkout (test card `5267 3181 8797 5449`, any OTP) |
-| Can the amount change? | No - taken from the approved intent | No - fixed in the Razorpay order on the server; reconciliation flags any `AMOUNT_MISMATCH` |
+| After a valid execute | A Razorpay order for the approved amount; the card shows **Pay with Razorpay** (test card `5267 3181 8797 5449`, any OTP) | The server charges the payment directly; nothing else to click |
+| Can the amount change? | No - fixed in the Razorpay order; reconciliation flags any `AMOUNT_MISMATCH` | No - taken from the approved request |
 | Access | Normal webhook -> `PURCHASE_SUCCEEDED` | Normal webhook -> `PURCHASE_SUCCEEDED` |
 
-Razorpay can't be charged by our server without the customer: card details and OTP are typed on Razorpay's checkout page. Charging without the customer would need Razorpay recurring tokens or server-side card payments, which must be enabled on the account (possible later work).
+**Choosing the provider:** if you say how to pay (*"buy it with the mock provider"*), the assistant proposes with that provider. If you don't, it leaves the choice to you: the card shows **Pay with: Razorpay (test mode) / Mock provider** next to **Approve**, preselected to `AGENT_DEFAULT_PROVIDER` (Razorpay when test keys are set). Your choice is applied when you click Approve; it can only change while the request is waiting for approval, and the change is logged (`PROVIDER_CHANGED`). The price and the approval rules don't depend on the provider. A Razorpay payment with no checkout at all (saved card / card mandate) is not offered: it was built and tried on 2026-11-19, but card mandates are not enabled on the Razorpay test account (see plan.txt), so it was removed.
 
-**Agent API (JSON)** for a real agent: `POST /agent/api/intents` with `{ productId, provider }` returns the intent and an `approvalUrl` for the user; `POST /agent/api/intents/:id/execute` with `{ token }` returns `PAID` (mock) or `CHECKOUT` with a `redirectUrl` (Razorpay). Rejections come back as HTTP 409 with a code: `TAMPERED`, `EXPIRED`, `WRONG_INTENT`, `WRONG_USER`, `MISMATCH`, `PRICE_CHANGED`, `CANCELLED`, `NOT_APPROVED`, `REPLAYED`.
+### LEARNX Assistant
 
-**Settings (optional):** `AGENT_APPROVAL_TTL_SECONDS` (default 300), `AGENT_APPROVAL_SECRET` (default: derived from `JWT_SECRET`), `MERCHANT_ID` (default `LEARNX`).
+**Setup:** get a free key at <https://console.groq.com/keys>, put `GROQ_API_KEY=...` in `.env`, restart the app. The default model is `openai/gpt-oss-120b` (`llama-3.3-70b-versatile` has been retired on Groq); `GROQ_MODEL` changes it. Optional: `GEMINI_API_KEY` as a fallback when Groq is rate-limited or down (`GEMINI_MODEL`), `LLM_PROVIDER` to choose which to try first, or `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for any other OpenAI-compatible API (for example Ollama on `http://localhost:11434/v1`). Without a key the panel says so and the rest of the app works as before. In `.env`, put comments on their own `#` line: `GROQ_MODEL=x   (comment)` is read as the whole line (the app ignores everything after the first space in the model and key settings, but other settings would be silently ignored).
 
-**Code:** table `purchase_intents`, `src/services/agentPurchase.js`, `src/routes/agent.js`, the mock provider's `/api/charge` endpoint, checks in `npm run verify:m7`. The ledger, access decisions, webhook processing and reconciliation were not changed.
+**What you see in the chat**
+- Your messages and the assistant's replies (simple tables and **bold** are rendered).
+- Tool calls are not shown (they happen on the server; the request's **details** page has the full history).
+- A **purchase card** for every request the assistant proposed, in its own area **below all messages** (just above the input box), so the buttons are always at the bottom: messages first, then the cards. A new card is added there, and approving or paying updates it in place. The card is drawn by the server from the request's current state in the database, never from the model's text, so the model can't fake a button or a price:
+
+| Request state | Card shows |
+|---|---|
+| `PROPOSED` | **Pay with: Razorpay / Mock** choice, **Approve** (with a password box above 30.00) and **Cancel** |
+| `APPROVED` | **Complete purchase** (asks the assistant again, e.g. if the model was busy) and **Cancel** |
+| `EXECUTED`, waiting for payment | **Cancel payment** (same as closing checkout), and **Pay with Razorpay** (`/assistant/pay/:id`: the checkout link stored on the request when it was executed, `purchase_intents.pay_url`; for an older request without one, the unpaid Razorpay order is found by its receipt, our order id) |
+| paid | Paid, with a link to Courses |
+| payment failed / cancelled at checkout / not paid in time | that message, "Nothing was charged", no buttons |
+
+Clicking **Approve** approves (your click) and then sends the assistant *"I approved purchase request …"* (shown as *"Approved Intro to SQL"*), so it completes the purchase without you typing anything. After Razorpay checkout you return to `/agent`. While a payment is pending its card refreshes itself every few seconds, so **Paid**, **Payment failed** (a declined payment: Razorpay's `payment.failed` webhook marks the order `FAILED`) or **Payment cancelled at checkout** appears without a reload; in those last two cases the card says nothing was charged, shows no Pay button, and you can ask the assistant again. Closing the Razorpay checkout without paying cancels that payment (order `CANCELLED`, request `FAILED`) and never puts the course in your cart; if Razorpay still takes the money later, the webhook completes the order and the card shows Paid. When a request is finished (paid, payment failed, cancelled at checkout, not paid in time, request cancelled), the app (not the model) adds one outcome line to the chat, e.g. *"Payment received: … is now in your library"* (green) or *"Payment for … was cancelled at checkout. Nothing was charged."* (red). The card shows its final state for about 5 seconds (`ASSISTANT_CARD_DONE_MS`, default 5000), then fades and collapses smoothly and is removed; after a reload finished requests have no card, only their line (their details stay under *Your purchase requests*). Replies are cleaned before they are shown: if the model degenerates into invisible characters or runs of "…", those are removed (and an unreadable reply is replaced by a plain sentence about what the tools did). The assistant is told not to use emoji or symbols. Purchases through the assistant start on `/agent` only (the course pages have just **Add to Cart**).
+
+**Assistant log (admin only).** Every chat turn, answered or failed, is written to the append-only `assistant_log` table: the user's message, the reply (and the model's own text if the app replaced it), the tools used and their results, flags (`CLEANED`, `CORRECTED`, `LIMIT_REACHED`, `REQUEST_WITHDRAWN`, `FALLBACK groq: MODEL_BUSY`, …), the model, tokens, time taken, IP and any error (including Groq limits and the daily message limit, which are not kept in the chat itself). **Clear chat** only clears the user's chat (`assistant_messages`); the log stays. The admin (`ADMIN_EMAIL`) sees it at **Admin → Assistant Log** (`/admin/assistant`): last-24-hour totals, search by email, user id, message, reply or error code, an *Errors only* / *Flagged* filter and one user's turns; everyone else is redirected. Rows cannot be updated or deleted (database trigger) except by the hourly retention purge, which removes rows older than `ASSISTANT_LOG_DAYS` (default 90; 0 keeps everything). Approval tokens never appear in it.
+
+**Keeping the model on current facts:** ownership and payments change outside the chat (refunds, cart purchases, cancelled checkouts), so every turn carries the current state (owned / open requests) right after your message, and for a buy request the server runs `list_courses` itself first and hands the model that result. Request ids are removed from replies when shown.
+
+**Tools the model can call** (`src/services/assistant.js`)
+| Tool | Does |
+|---|---|
+| `list_courses` | courses with price, owned or not, and any open request |
+| `list_my_requests` | the assistant's recent requests and their payment |
+| `propose_purchase` `{ productId, provider? }` | creates a request at the catalog price; the page shows it as a card. `provider` only when you named one; otherwise you pick on the card |
+| `check_request` `{ intentId }` | status of one of its requests |
+| `execute_purchase` `{ intentId }` | completes a request **you approved**: `PAID` (mock) or `CHECKOUT` (the card shows the Pay button) |
+
+There is **no approve tool**. The assistant has its own agent identity (`learnx-assistant`, one per user, table `agent_keys`), which is what binds a request and its approval token to it.
+
+**Guardrails:** 30 messages per user per day (`ASSISTANT_MESSAGES_PER_DAY`, M5 quota), at most 6 model calls per message, 1000 characters per message, tool arguments checked (an unknown course, bad JSON, a made-up tool or someone else's request comes back as an error to the model), and the system prompt tells the model that course text is data, not instructions. Even a model that misbehaves can only *propose*; nothing is paid without your click. The conversation is stored per user (`assistant_messages`); **Clear chat** forgets it.
+
+**Limits.** When a limit is reached the chat shows just that message, e.g. *"The assistant has reached its usage limit for now (Groq free tier). Please try again in 11 seconds."* (Groq's wait time from its `Retry-After` header), *"You have reached today's limit of 30 assistant messages. Please try again tomorrow."* or *"Too many purchase requests today (limit 20). Try again later."* (the turn ends with this message; the model is not asked to explain it). If the model fails part-way through a turn (rate limit, timeout) before any payment started, nothing of that turn is kept: a request it proposed in that turn is withdrawn (logged as `CANCELLED` by `system`), so there is no hidden open request, and the message doesn't count against the daily limit. If a payment had already started (`execute_purchase` ran), those steps are kept and the card shows **Pay**; after an approval the card shows **Complete purchase** to continue.
+
+**Mock provider through the assistant** works like Razorpay: the card shows **Pay … with Mock provider**, which opens the mock's checkout page (Pay / Simulate Failure / Cancel, with `back=agent`); Pay and Simulate Failure return to `/agent`, Cancel to the chat's "checkout closed" route. Nothing is charged until a button is pressed there. (The mock still has its server-to-server `charge` API; the assistant no longer uses it.)
+
+**Model output.** Replies are checked before they are shown or stored: zero-width characters and runs of "…" are removed, and a reply that contains the model's own planning ("The user wants…", "We need to…", two or more such phrases) or nothing readable is replaced by a plain sentence about what the tools did (e.g. *"I created the purchase request. Approve it on the card below."*).
+
+Privacy: your messages and the course list are sent to the model provider (Groq, or Google for Gemini). No passwords, cards or approval tokens are sent.
+
+**Settings (optional):** `AGENT_APPROVAL_TTL_SECONDS` (300), `AGENT_STEPUP_ABOVE_CENTS` (3000), `AGENT_PROPOSALS_PER_DAY` (20), `AGENT_PROPOSAL_TTL_HOURS` (24), `AGENT_UNPAID_MINUTES` (30), `AGENT_SWEEP_INTERVAL_MS` (60000, 0 = off), `AGENT_APPROVAL_SECRET` (derived from `JWT_SECRET`), `MERCHANT_ID` (`LEARNX`), `AGENT_DEFAULT_PROVIDER` (`razorpay` with test keys, else `mock`), `ASSISTANT_MESSAGES_PER_DAY` (30), `ASSISTANT_CARD_DONE_MS` (5000), `ASSISTANT_LOG_DAYS` (90), `GROQ_API_KEY`, `GROQ_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `LLM_PROVIDER`, `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`.
+
+**Removed (2026-11-19):** the *Simulated agent* panel (buttons that proposed without AI, and the page that showed the approval token for tampering demos), *Agent keys* for outside agents, the `/agent/api/*` JSON API and `scripts/agent-client.js`. Tampering, replay, expiry and wrong-agent cases are still checked by `npm run verify:m7` against the purchase service.
+
+**Code:** tables `purchase_intents`, `agent_keys`, `intent_events`, `assistant_messages`, `assistant_log` (admin log); `src/services/assistant.js` (model, tools, chat), `src/services/agentPurchase.js` (propose / approve / execute rules), `src/services/agentKeys.js` (agent identity), `src/routes/agent.js` (chat, cards, request page); checks in `npm run verify:m7` and `npm run verify:assistant` (with a fake model, no key needed). The ledger and access decisions were not changed.
+
+## Recent changes (2026-11-20)
+
+- **LEARNX Assistant chat:** purchase cards leave the chat a few seconds after the payment finishes; each payment keeps a one-line result. Mock purchases go through the mock checkout page like Razorpay. Limits (Groq, daily messages, purchase requests) show just their message. Broken or leaked model text is replaced by a plain sentence.
+- **Admin Assistant Log** at `/admin/assistant` (admin only): every chat turn with message, reply, tools, model, tokens, time and errors; search, *Errors only* / *Flagged* filters, per-user view. Append-only; kept `ASSISTANT_LOG_DAYS`.
+- **Pass:** one renewal at a time; Cancel renewal refunds a paid renewal in full; Refund refunds every payment of the current pass and then ends its free (admin / scholarship) time.
+- **Seats:** after the seat checkout you return to `/org` with the result.
+- **One order / one grant per click:** cart and seat checkouts and admin grants are idempotent (`npm run verify:idempotency`).
+- After updating: `npm run db:init`, restart the app and the mock provider.
+
+## End-to-end test report
+
+`docs/E2E-TESTS.md`: the manual end-to-end runs (assistant chat, cart, refunds, webhook failure switches, reconciliation, admin assistant log, pass renew / refund rules, seat checkout return) with the mock provider and Razorpay test mode, results and the defects found.
 
 ## Project structure
 
@@ -211,12 +308,12 @@ src/server.js        App entry point
 src/routes/          HTTP routes (auth, courses, cart, checkout, admin, webhooks)
 src/domain/          Commerce ledger, projection and catalog logic
 src/payment/         Payment adapters (mock, Razorpay) and webhook processing
-src/services/        Cart, pricing, seats, subscriptions, usage quotas and agent purchases
+src/services/        Cart, pricing, seats, subscriptions, usage quotas, agent purchases, agent keys and the AI assistant
 src/views.js         HTML templates
 ```
 
 ## Verification
 
 ```bash
-npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas) and M7 (agent purchases) checks against Postgres
+npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model) and idempotency (one order / grant per click) checks against Postgres
 ```

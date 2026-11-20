@@ -7,6 +7,8 @@ const { requireAuth } = require('../auth');
 const { layout, esc } = require('../views');
 const { PaymentService } = require('../payment/service');
 const seats = require('../services/seats');
+const checkoutOnce = require('../services/checkoutOnce');
+const { randomUUID } = require('node:crypto');
 
 const money = (cents, cur = 'USD') => `$${(Number(cents) / 100).toFixed(2)} ${esc(cur)}`;
 const when = (t) => (t ? new Date(t).toLocaleString() : '-');
@@ -49,7 +51,8 @@ function courseOptions(catalog) {
 
 function buyForm(catalog, { needsName }) {
   return `
-  <form hx-post="/org/seats/checkout" hx-target="#buy-msg" style="display:flex;flex-direction:column;gap:0.6rem;max-width:520px">
+  <form hx-post="/org/seats/checkout" hx-target="#buy-msg" hx-disabled-elt="find button[type=submit]" style="display:flex;flex-direction:column;gap:0.6rem;max-width:520px">
+    <input type="hidden" name="checkoutKey" value="${randomUUID()}">
     ${needsName ? `<label>Organization name <input name="orgName" required maxlength="120" placeholder="e.g. Acme Data Team"></label>` : ''}
     <label>Course <select name="courseId" required>${courseOptions(catalog)}</select></label>
     <label>Seats <input name="seats" type="number" min="1" max="${seats.MAX_SEATS_PER_PACK}" value="5" required></label>
@@ -62,7 +65,18 @@ function buyForm(catalog, { needsName }) {
   </form>`;
 }
 
+// A pack whose checkout was cancelled, failed or never paid: one muted line, nothing charged.
+// (The pack row stays PENDING_PAYMENT: a payment that still arrives later activates it.)
+const UNPAID = { CANCELLED: 'Payment cancelled', FAILED: 'Payment failed', EXPIRED: 'Not paid in time' };
+
 function poolCard(p, course) {
+  if (p.status === 'PENDING_PAYMENT' && UNPAID[p.order_status]) {
+    return `
+  <div class="card" style="margin-bottom:1rem;opacity:0.7;padding:0.6rem 1rem">
+    <small>${esc(course?.name || p.course_id)} · ${p.seats} seats · ${money(p.final_payable_cents)} via ${esc(p.provider)} · ${when(p.created_at)} ·
+      <span class="err">${UNPAID[p.order_status]}</span>. Nothing was charged.</small>
+  </div>`;
+  }
   const used = p.assigned.length;
   const refundPending = p.order_status === 'REFUND_PENDING';
   const status =
@@ -90,7 +104,7 @@ function poolCard(p, course) {
       <span>${status}</span>
     </div>
     <p style="margin:0.25rem 0 0.75rem;color:#5B5F6E">
-      <strong>${used} of ${p.seats}</strong> seats in use · paid ${money(p.final_payable_cents)} via ${esc(p.provider)} · bought ${when(p.created_at)}
+      <strong>${used} of ${p.seats}</strong> seats in use · ${p.status === 'PENDING_PAYMENT' ? 'price' : 'paid'} ${money(p.final_payable_cents)} via ${esc(p.provider)} · ${p.status === 'PENDING_PAYMENT' ? 'ordered' : 'bought'} ${when(p.created_at)}
     </p>
     ${canAssign ? `
     <form hx-post="/org/pools/${p.id}/assign" hx-target="#a-${p.id}" style="display:flex;gap:0.5rem;flex-wrap:wrap">
@@ -108,11 +122,23 @@ function poolCard(p, course) {
   </div>`;
 }
 
+// Result of a seat-pack checkout, shown once on /org (?checkout=paid|failed|cancelled).
+const CHECKOUT_NOTES = {
+  paid: ['ok', 'Payment received. Your new seats are below (they appear as soon as the provider confirms the payment).'],
+  failed: ['err', 'The payment failed. Nothing was charged.'],
+  cancelled: ['err', 'Payment cancelled. Nothing was charged.'],
+};
+const checkoutNote = (req) => {
+  const n = CHECKOUT_NOTES[req.query.checkout];
+  return n ? `<div class="card" style="border-left:4px solid ${n[0] === 'ok' ? '#2e7d32' : '#c62828'}"><p class="${n[0]}" style="margin:0">${n[1]}</p></div>` : '';
+};
+
 async function renderOrgPage(req, res, org) {
   const { catalog } = req.app.locals.engine;
   if (!org) {
     const body = `
       <h2>Organization</h2>
+      ${checkoutNote(req)}
       <div class="card">
         <h3>Buy seats for your team</h3>
         <p style="color:#5B5F6E;margin-bottom:1rem">Create an organization and buy seats for a course. You can then give each seat to a teammate by email, take it back, or move it to someone else.</p>
@@ -124,6 +150,7 @@ async function renderOrgPage(req, res, org) {
   const isOwner = org.owner_user_id === req.user.id;
   const body = `
     <h2>${esc(org.name)}</h2>
+    ${checkoutNote(req)}
     ${!isOwner ? '<p class="msg">You are viewing this organization as a platform admin.</p>' : ''}
     ${pools.map((p) => poolCard(p, catalog.get(p.course_id))).join('') || '<p>No seat packs yet.</p>'}
     ${isOwner ? `<div class="card"><h3>Buy more seats</h3>${buyForm(catalog, { needsName: false })}</div>` : ''}`;
@@ -155,7 +182,13 @@ router.post('/org/seats/checkout', requireAuth, async (req, res) => {
     const b = req.body || {};
     const provider = b.provider === 'razorpay' ? 'razorpay' : 'mock';
     const course = catalog.get(String(b.courseId || ''));
-    const out = await seats.createSeatPackOrder({ userId: req.user.id, orgName: b.orgName, course, seats: b.seats, provider });
+    const checkoutKey = checkoutOnce.validKey(b.checkoutKey);
+    const out = await seats.createSeatPackOrder({ userId: req.user.id, orgName: b.orgName, course, seats: b.seats, provider, checkoutKey });
+    if (out.repeated) {
+      // Same form submitted again (double click / retry): back to the first order's checkout.
+      const again = await checkoutOnce.repeatAnswer(out.repeated);
+      return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(err(again.message));
+    }
     const { redirectUrl } = await new PaymentService({ catalog }).initiatePayment({
       userId: req.user.id,
       productId: course.id,
@@ -163,7 +196,10 @@ router.post('/org/seats/checkout', requireAuth, async (req, res) => {
       orderId: out.orderId,
       provider,
     });
-    res.set('HX-Redirect', redirectUrl || '/org').end();
+    // back=org: after paying (or cancelling) on the provider's page the user returns to /org.
+    const url = redirectUrl ? `${redirectUrl}${redirectUrl.includes('?') ? '&' : '?'}back=org` : null;
+    await checkoutOnce.rememberUrl(out.orderId, url);
+    res.set('HX-Redirect', url || '/org').end();
   } catch (e) {
     if (e instanceof seats.SeatError) return res.send(err(e.message));
     console.error('[org] seat checkout failed:', e);

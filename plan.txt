@@ -17,18 +17,23 @@ M8 – Audit and failure validation: The complete transaction-to-entitlement his
 Done when: A sandbox demonstration completes one-time, subscription and enterprise-seat flows, correctly changes access after refund/expiry, reconciles deliberately lost/duplicate events and demonstrates an optional agent-authorized purchase without coupling the core ledger to the agent-payment protocol.
 
 ==================================================================
-STATUS (updated 2026-11-14)
+STATUS (updated 2026-11-20)
 ==================================================================
 M1 Transaction model ............ DONE
 M2 Adapter + idempotency ........ DONE
 M3 Entitlement ledger ........... DONE
-M4 Commercial rules ............. DONE
+M4 Commercial rules ............. DONE (2026-11-20: one renewal at a time, full pass refund)
 M5 Usage quotas ................. DONE
 M6 Refund + reconciliation ...... DONE
-M7 Agent-approved purchase ...... DONE (simulated agent; not committed yet)
-M8 Audit + failure tests ........ PARTIAL
+M7 Agent-approved purchase ...... DONE (agent keys, hardening, LEARNX Assistant on Groq,
+                                        admin assistant log)
+M8 Audit + failure tests ........ DONE (failure switches, demo pass, E2E runs in
+                                        docs/E2E-TESTS.md)
 
-Run all checks: npm run verify
+Everything since commit 7dd197d is NOT committed yet (see PENDING).
+Run all checks: npm run verify   (8 suites, all pass on 2026-11-20)
+Update the database after pulling: npm run db:init (adds assistant_log, orders.refund_scope,
+orders.checkout_key / checkout_url)
 
 ==================================================================
 COMPLETED
@@ -42,8 +47,10 @@ M1 - Transaction model (2026-08-12)
   - Free grants can't be refunded. A refund covers the whole order and asks
     the provider for the amount actually paid (after coupons).
   - Coupon discount is split across order lines, so ledger amounts add up.
-  - Subscriptions are stacked paid periods; refunding one month removes only
-    that month.
+  - Subscriptions are stacked paid periods. Since 2026-11-20 Refund refunds the
+    whole current pass (every paid period still running or queued, one provider
+    refund each) and then ends its free periods; Cancel renewal refunds only a
+    renewal paid in advance. A REVOKE still removes just the period it names.
   - Refunds are webhook-driven: access is removed only when the provider's
     refund webhook arrives. A later refund.failed marks the order
     REFUND_FAILED for admin review.
@@ -117,40 +124,253 @@ M7 - Agent-approved purchase (2026-11-15, not committed yet)
     purchase_intents.order_id. JSON API for a real agent: /agent/api/*.
   - Checks: npm run verify:m7.
 
+M7 hardening (2026-11-19, not committed yet)
+  Correctness:
+  - Ownership checked again at execute (ALREADY_OWNED, no double purchase).
+  - One open request per user + course (unique index; DUPLICATE_REQUEST).
+  - Request shows the payment outcome from its order (PENDING / PAID /
+    REFUNDED / CHARGED_BACK / FAILED).
+  - Sweeper every minute: proposals > 24 h and unused approvals -> EXPIRED;
+    executed but unpaid > 30 min -> FAILED (order left to webhook / recon).
+  - intent_events: every step and every rejected attempt (code, IP);
+    shown as History on the request page.
+  Real-agent support:
+  - Agent keys (/agent): own credential, hashed, scopes read/propose/execute,
+    revocable. /agent/api/* accepts only agent keys; nothing can approve
+    through the API.
+  - GET /agent/api/intents/:id: agent polls; token handed out once, only to
+    the proposing key; never shown in the browser. WRONG_AGENT otherwise.
+  - Password step-up to approve above AGENT_STEPUP_ABOVE_CENTS (3000).
+  - Daily proposal limit per key (AGENT_PROPOSALS_PER_DAY=20, M5 quotas).
+  - scripts/agent-client.js: command-line agent (courses, propose, wait).
+  - verify:m7 extended (service + HTTP checks for all of the above).
+
+Fixes from end-to-end browser testing (2026-11-19, not committed yet)
+  Reconciliation (/admin/reconciliation):
+  - An issue an admin resolved stays resolved: the same issue found again is
+    counted as "acknowledged" and any open copy is closed (recon:auto).
+  - PENDING orders older than ORDER_PENDING_EXPIRY_MINUTES (60) -> EXPIRED.
+    A late payment for an EXPIRED / CANCELLED / FAILED order still completes it.
+  - Paging (20 rows, "Show more") on the open / fixed / inbox / runs tables.
+  Cart and checkout:
+  - Adding a course you already own is refused; checkout re-checks ownership,
+    removes owned items and charges nothing.
+  - Cancel on the provider page -> order CANCELLED, items back in the cart.
+  - A failed payment marks its order FAILED (was left PENDING).
+  - Checkout errors show in the page (htmx needs status 200 to swap).
+  UI: space between the email and Logout in the nav.
+
+M7 Razorpay saved card (2026-11-19) - TRIED, REMOVED
+  - Built a "saved card" pay method (Razorpay card mandate via Registration
+    Link, server-side POST /payments/create/recurring) so the agent could pay
+    with no checkout. Removed again the same day: card mandates don't work on
+    the Razorpay test account. The only domestic recurring test card
+    (Visa 4718 6091 0820 4366) fails with SERVER_ERROR at
+    card_mandate_process (e.g. pay_U26Pm5qJzTcOyj); the international test
+    cards are refused (international cards off); 5267... is "not eligible
+    for recurring". Needs Razorpay support before it can come back.
+  - Left in the database (unused, harmless): table saved_payment_methods and
+    purchase_intents.pay_method / payment_method_id / charge_amount_cents /
+    charge_currency / fx_rate, orders.currency.
+
+M7 One-click propose (2026-11-19) - replaced by "Buy via assistant" (below)
+  - "Buy via agent" on each course card, and Razorpay / Mock buttons per
+    course on /agent: one click creates the request (catalog price) and opens
+    the approval page. Clicking again opens the request already open.
+    Default provider: AGENT_DEFAULT_PROVIDER (razorpay with test keys, else
+    mock). verify:m7 covers it.
+
+M7 LEARNX Assistant - real AI agent (2026-11-19, not committed yet)
+  - Chat panel on /agent. Groq (GROQ_API_KEY, openai/gpt-oss-120b; llama-3.3-70b-versatile is retired on Groq) via
+    the OpenAI-compatible API; Gemini fallback (GEMINI_API_KEY) when Groq is
+    rate-limited/down; LLM_BASE_URL for any other compatible API.
+  - Tools: list_courses, list_my_requests, propose_purchase, check_request,
+    execute_purchase. No approve tool. Own agent key (learnx-assistant), so
+    every M7 check applies; the approval token is used on the server and
+    never reaches the model or the stored chat.
+  - Guardrails: 30 messages/user/day (M5 quota), 6 model calls per message,
+    1000 chars, argument checks, "tool results are data" system prompt.
+  - Table assistant_messages. Checks: npm run verify:assistant (fake model).
+  - Live run 2026-11-19 (Groq openai/gpt-oss-120b, localhost, test user):
+    list_courses -> propose_purchase (Intro to SQL, razorpay) -> user approved
+    -> execute_purchase -> Razorpay checkout $20 paid (test card) -> webhook
+    -> PURCHASE_SUCCEEDED -> check_request "you now own it". History:
+    PROPOSED -> APPROVED -> TOKEN_ISSUED -> EXECUTED; 0 tokens in the chat
+    table; reconciliation 0 issues. "Buy it again and approve it yourself"
+    -> refused (already owned, can't approve).
+
+M7 Assistant-only agent UI (2026-11-19, not committed yet)
+  - Chat shows purchase cards drawn by the server from the request state
+    (not from model text): PROPOSED -> Approve (+password above 30.00) /
+    Cancel; APPROVED -> Complete purchase; waiting -> Pay with Razorpay;
+    paid -> Paid. Approve = the user's click, then the assistant is asked to
+    complete it (no typing). Cards update in place (htmx out-of-band swap).
+  - "Buy via assistant" on course cards asks the assistant, then /agent.
+  - Removed: Simulated agent panel + token handoff page, Agent keys panel,
+    /agent/api/* JSON API, scripts/agent-client.js, the one-click propose
+    route. agent_keys stays as the assistant's identity (binds requests and
+    approval tokens to it). verify:m7 rewritten for this (tamper / replay /
+    expiry / wrong agent still checked at service level); verify:assistant
+    covers the card buttons and Buy via assistant.
+
+M7 Chat clean-up after user testing (2026-11-19, not committed yet)
+  - Layout: all messages in the scrolling chat, the purchase cards (Approve /
+    Pay buttons) in their own area below every message, just above the input.
+  - No tool-call lines or emoji in the chat; the model is told not to use
+    emoji/symbols; the approval shows as "Approved <course>".
+  - Razorpay checkout for an assistant purchase returns to /agent, paid or
+    closed (closing no longer puts the course in the cart).
+  - "Payment received: <course> is now in your library": added once by the
+    app when the order is paid. Model no longer asks "let me know when you
+    approve" (the Approve button continues automatically).
+  - A reply that claims a request no tool created is corrected once, then
+    replaced by the truth.
+  - Provider choice: if the user doesn't say how to pay, the model leaves
+    provider out and the card shows "Pay with: Razorpay / Mock" before
+    Approve (agentPurchase.setProvider: owner only, PROPOSED only, logged
+    PROVIDER_CHANGED). Also on the request page.
+  - Fix (found in user testing): Groq failed right after execute_purchase,
+    the whole turn was dropped, so the Razorpay link was lost and the card
+    showed "Payment processing" with no Pay button. Now: completed tool steps
+    are saved even if the model fails; the checkout link is stored on the
+    request (purchase_intents.pay_url); Pay goes to /assistant/pay/:id, which
+    also recovers an older request's link from Razorpay (order receipt).
+  - Removed "Buy via assistant" from course cards (/assistant/buy): buying
+    with the assistant starts on /agent only.
+  - Payment outcome on the card: closing Razorpay checkout cancels that
+    payment (order CANCELLED, request FAILED, CHECKOUT_CLOSED in history);
+    a declined payment (order FAILED) shows "Payment failed"; neither keeps
+    the Pay button. Cards waiting for payment poll /assistant/card/:id every
+    4 s, so the result shows without a reload.
+  - Fix: a new request for a course is refused (PAYMENT_PENDING) while an
+    earlier one is executed but unpaid (found in testing: two open Razorpay
+    checkouts for the same course could both be paid).
+
+E2E test run (2026-11-20, docs/E2E-TESTS.md, not committed yet)
+  - 30+ manual cases over ngrok (own account) and localhost (test account):
+    chat, provider choice, step-up, Razorpay success/decline/closed checkout,
+    mock duplicate/drop/delay/refund-500, refunds, cart cancel/fail, recon.
+  - Fixed during the run: Cancel payment button; stale chat (current state +
+    server-side list_courses before a buy request); PAID_LATE after a cancel;
+    error text after a mid-purchase model failure; request ids hidden.
+
+M8 Short demo pass (2026-11-19, not committed yet)
+  - SUB_DURATION_MINUTES=N (demo only): every pass period lasts N minutes,
+    so expiry can be shown live (Access -> SUBSCRIPTION_EXPIRED). Labels show
+    "N min (demo)". Ledger untouched; verify ignores the setting.
+    README walkthrough step 3 updated.
+
 Cleanups done
   - .env spacing fixed.
   - In-memory verify script (src/domain/verify.js) works again.
   - "Add to Cart" htmx error fixed.
+  - htmx swap fix on Access / AI summary buttons; "Execute" label on the
+    agent page (found in browser testing, 2026-11-15).
 
 ==================================================================
-PENDING
+PENDING (2026-11-20)
 ==================================================================
-M7 - Agent-approved purchase  [DONE with simulated agent]
-  - Commit M7.
-  - Optional later: a real AI agent (Claude, claude-opus-5-5, via
-    @anthropic-ai/sdk tool use) calling /agent/api/*, with its own
-    credential that can propose/execute but not approve.
-  - Optional later: Razorpay recurring tokens so the agent can pay alone.
+Needs the owner
+  1. Commit. Nothing since 7dd197d is committed (28 modified files + new docs/,
+     src/services/assistant.js, src/services/verify-assistant.js). Suggested
+     commits: assistant (chat, cards, limits, model output cleaning) / admin
+     assistant log / pass renew + refund rules / seat checkout return to /org /
+     docs (README, E2E-TESTS, plan).
+  2. Other databases: npm run db:init.
+  3. ADMIN_EMAIL account must exist to see the admin pages (incl. Assistant Log).
 
-M8 - Audit and failure tests  [PARTIAL]
-  Done: activity page with source/reason; verify suite; failure switches.
-  Dropped: admin trace page (history already visible in /activity and
-  /admin/reconciliation).
-  To do:
-  - Commit the failure switch changes.
-  - Browser walkthrough: DONE (README "Demo walkthrough", 8 steps).
-  - Way to show expiry in the walkthrough without waiting 30 days
-    (e.g. SUB_DURATION_MINUTES for a short demo pass).
+Small gaps: all done 2026-11-20 (see the dated note at the end)
+  - verify:failures in its proper setup: all 6 cases pass (duplicate, delay, drop
+    payment, drop refund, reorder, refund API 500).
+  - Step-up password box: autocomplete="new-password" (no browser autofill).
+  - Browser: seat pack paid with Razorpay -> /org, pack ACTIVE; pass refund with one
+    payment refused (mock refund_500) -> "Refund requested for 1 of 2 payments",
+    retry refunds the rest.
+  - README walkthrough steps not covered elsewhere today (1 buy, 2 refund, 7 quota)
+    re-run in the browser.
 
 Optional / later
-  - One real Razorpay test-mode payment + refund by hand in the browser.
-  - Test users (@test.local) stay in the append-only ledger (by design).
   - Quota usage shown on an admin page.
-  - Old mock payments (made before the mock kept records) show as
-    LEDGER_PAYMENT_NOT_AT_PROVIDER in reconciliation; they drop out of the
-    7-day window on their own.
+  - GEMINI_API_KEY as fallback when Groq's free tier is rate-limited.
+  - Passkey (WebAuthn) instead of the password step-up; ES256 signing if a
+    third party must verify approvals.
+  - Razorpay saved card: needs Razorpay to enable card mandates on the test
+    account first (tried and removed).
 
-SUGGESTED ORDER
-  1. Commit failure switches + M7
-  2. Short demo pass (expiry in the walkthrough)
-  3. Optional: real AI agent
+Known behaviour (no action)
+  - Limit messages (Groq / daily limit) are shown but not stored in the chat;
+    the admin assistant log has them.
+  - Test users (@test.local) stay in the append-only ledger (by design).
+
+Done since the last plan update (details in the dated notes below)
+  - From the old pending list: failure switches, M7 hardening,
+    short demo pass, Razorpay test-mode browser run, README walkthrough.
+  - Mock provider restarted with the new code (back=org) and the 5 test
+    payments from the temporary 3011 copy; reconciliation no longer needs them
+    to drop out of the window.
+
+==================================================================
+CHANGE LOG 2026-11-20
+==================================================================
+2026-11-20 - Chat cards, cart / subscription E2E (second run)
+  - Finished purchase cards leave the chat: when a request is finished (paid, failed,
+    cancelled, unpaid, expired) the app writes one outcome line (assistant.noteOutcomes,
+    note paid:<id> / done:<id>, tone ok / err / msg) and the card shows its final state
+    for ASSISTANT_CARD_DONE_MS (5000) and then fades / collapses (CSS max-height +
+    opacity) and is removed. /agent renders cards only for open requests.
+    Fixes found while testing in the browser: htmx sets the new class only after
+    settling (observer watches class changes); out-of-band lines were placed above the
+    same response's messages (now inline when the response goes to #chat-log).
+  - Model output cleaning (assistant.cleanReply): Groq gpt-oss sometimes returned
+    zero-width characters and runs of "..."; one such reply widened the chat log
+    (horizontal scroll). Replies are cleaned when stored and when shown; bubbles wrap.
+  - Demo pass warning counts minutes ("ends in 5 minutes", was "1 day").
+  - E2E: multi-item cart (+ coupon), cancel / fail, owned item in cart, pass buy /
+    renew / failed renew / two refunds / live expiry, Razorpay 2-course cart + refund,
+    Razorpay pass + refund, chat card fade (mock paid via delayed webhook, Razorpay
+    cancel payment). All pass; docs/E2E-TESTS.md.
+  - Mock provider through the assistant now uses the mock checkout page like Razorpay
+    (Pay with Mock provider button, back=agent; mock-provider/server.js returns to /agent or
+    /assistant/checkout-closed). The direct server-side charge is no longer used.
+  - Limits: just the message. Groq 429 -> "usage limit ... try again in N seconds" (Retry-After);
+    daily messages / purchase requests -> their message, the turn ends there. A turn that fails
+    before a payment started keeps nothing and withdraws its proposed request (system CANCELLED).
+  - Leaked model planning ("The user wants", "We need to", 2+ phrases) -> plain fallback sentence.
+  - Browser re-test of all of the above (mock Pay / Simulate Failure / Cancel payment, two
+    /agent tabs, Razorpay with a Groq limit mid-purchase): boxes leave the chat when a payment
+    is finished, each payment keeps its line. Fixed: second tab missed the line (D14),
+    stronger leaked-planning check.
+- 2026-11-20: Admin assistant log. New append-only table assistant_log (one row per chat turn,
+  answered or failed: message, reply, model text if replaced, tools, flags, model, tokens, ms,
+  IP, error). Not touched by Clear chat; UPDATE/DELETE blocked by a trigger except the hourly
+  retention purge (ASSISTANT_LOG_DAYS, default 90). Admin page /admin/assistant (ADMIN_EMAIL
+  only): 24h totals, search, errors/flagged filter, per-user view. verify-assistant covers it.
+- 2026-11-20: Pass renew/refund rules + seat checkout return.
+  * One renewal at a time: no Renew while a renewal is paid in advance / being paid / a refund
+    runs (card + /subscription/renew + cart and direct checkout). RENEW_PENDING_MINUTES (30).
+  * Cancel renewal with a paid renewal refunds that renewal in full (option A), keeps the
+    current period; orders.refund_scope = RENEWAL_CANCEL.
+  * Refund = whole pass: every paid live period, one provider refund per payment
+    (refund_scope = PASS_FULL). When all are confirmed, admin/scholarship periods end
+    (MANUAL_REVOKE, source SYSTEM, after the last refund webhook). Refused part -> order reopens.
+  * Pass card reloads the page when a pending refund finishes (course cards update too).
+  * Seat checkout returns to /org?checkout=paid|failed|cancelled (mock + Razorpay, back=org).
+  * Mock provider change needs a restart; its data.json got the 5 test payments made on a
+    temporary mock copy (port 3011), so reconciliation clears once the mock is restarted.
+- 2026-11-20: Idempotency gaps found while checking the brief ("all state-changing operations
+  idempotent") and fixed:
+  * Admin grant: random event id -> a double submit wrote two grants (a scholarship pass got
+    two periods). Now the form's one-time grantKey is the event id; repeats are DUPLICATE_EVENT.
+  * Cart / seat-pack checkout: a double click created two PENDING orders. Now a one-time
+    checkoutKey per form (orders.checkout_key, unique per user, advisory lock per key) and the
+    stored checkout_url: repeats go to the same checkout page; a used key gets a message only.
+    Buttons disabled while the request runs. New suite: npm run verify:idempotency.
+- 2026-11-20: Open items closed. verify:failures passes end to end (app started with
+  MOCK_PROVIDER_URL=http://localhost:3001 RECON_GRACE_SECONDS=0 RECON_STUCK_REFUND_MINUTES=0).
+  Step-up password input uses autocomplete="new-password" (checked in verify-m7).
+  Found in the browser: seat packs whose checkout was cancelled / failed / expired stayed on /org
+  as "Waiting for payment ... paid $X" forever; now one muted line "Payment cancelled. Nothing was
+  charged." (pack row unchanged, a late payment still activates it); unpaid packs say "price",
+  not "paid" (checked in verify-idempotency). Final reconciliation: 0 open issues.
+  Note: .env MOCK_PROVIDER_URL (fb75 ngrok tunnel) is offline; start the app with
+  MOCK_PROVIDER_URL=http://localhost:3001 or restart that tunnel.

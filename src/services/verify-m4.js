@@ -4,6 +4,7 @@
 // the Razorpay normalizer (no network) and only this script's own users. Ledger rows stay
 // (append-only by design); organizations, packs and inbox rows it made are removed at the end.
 require("dotenv").config();
+delete process.env.SUB_DURATION_MINUTES; // demo switch off: checks expect real 30-day periods
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 const pool = require("../db");
@@ -37,7 +38,7 @@ async function cleanup() {
   const subProduct = products.find((x) => x.type === "SUBSCRIPTION");
   const engine = createEngine({ products, store: new PgLedgerStore(pool) });
   await engine.projection.rebuildFromLedger();
-  const { ledger, decisions, projection } = engine;
+  const { ledger, decisions, projection, catalog } = engine;
   const processor = new WebhookProcessor({ ledger });
 
   const newUser = async (tag) =>
@@ -184,20 +185,131 @@ async function cleanup() {
   assert.equal((await captured(p2)).outcome, "DUPLICATE");
   console.log("[ok] M4 renew: second purchase is SUBSCRIPTION_RENEWED, stacked after the current end; replay is a duplicate");
 
-  const c1 = await subs.cancelRenewal({ ledger, projection, user: s });
+  // ---- one renewal at a time
+  let st = await subs.passState({ ledger, projection, userId: s.id });
+  assert.equal(st.queued.length, 1, "the renewal is a period paid in advance");
+  assert.equal(st.canRenew, false, "no Renew while a renewal is already paid");
+  assert.match(await subs.renewBlocked({ ledger, projection, userId: s.id }), /already renewed/);
+  console.log("[ok] M4 one renewal at a time: with a renewal paid in advance, Renew is hidden and refused");
+
+  // Provider refunds are stubbed here; the refund webhook is delivered by the test, as in production.
+  const { PaymentService } = require("../payment/service");
+  const realRefund = PaymentService.prototype.initiateRefund;
+  const refundCalls = [];
+  let refuse = null;
+  PaymentService.prototype.initiateRefund = async function (a) {
+    refundCalls.push(a);
+    if (refuse && refuse(a)) throw new Error("provider said no");
+    return { providerRefundId: rid("rfnd") };
+  };
+  const refundHook = (pay) => deliver({ event: "refund.created", payload: { refund: { entity: { id: rid("rfnd"), entity: "refund", amount: pay.amount, currency: "USD", payment_id: pay.id, notes: {}, created_at: now() } }, payment: { entity: pay } } }, `refund.created:${randomUUID()}`);
+  const orderOf = (pay) => pay.notes.orderId;
+  const orderRow = async (id) => (await pool.query("SELECT status, refund_scope FROM orders WHERE id=$1", [id])).rows[0];
+
+  // ---- Cancel renewal with a renewal paid in advance: that renewal is refunded in full (option A)
+  const c1 = await subs.cancelRenewal({ ledger, projection, catalog, user: s });
   assert.equal(c1.ok, true);
+  assert.deepEqual(refundCalls.map((c) => c.orderId), [orderOf(p2)], "only the queued renewal is refunded");
+  assert.equal(refundCalls[0].amount, subProduct.price, "in full");
+  assert.deepEqual(await orderRow(orderOf(p2)), { status: "REFUND_PENDING", refund_scope: "RENEWAL_CANCEL" });
+  assert.ok(subs.activePass(projection, s.id).cancelledAt, "Not renewing");
+  st = await subs.passState({ ledger, projection, userId: s.id });
+  assert.equal(st.refundPending, true);
+  assert.equal(await subs.renewBlocked({ ledger, projection, userId: s.id }), "A refund of your pass is in progress.");
+  assert.equal((await refundHook(p2)).outcome, "APPENDED");
+  assert.equal((await orderRow(orderOf(p2))).status, "REFUNDED");
   const afterCancel = subs.activePass(projection, s.id);
-  assert.ok(afterCancel.cancelledAt, "cancel recorded");
-  assert.equal(Date.parse(afterCancel.expiresAt), end2, "cancelling keeps access to the paid-up end");
-  assert.equal(decisions.evaluateAccess(s.id, course.id).reason, "ACTIVE_SUBSCRIPTION_PASS");
+  assert.equal(Date.parse(afterCancel.expiresAt), end1, "back to the end of the current period");
+  assert.equal(decisions.evaluateAccess(s.id, course.id).reason, "ACTIVE_SUBSCRIPTION_PASS", "current period kept");
   assert.equal(subs.renewalReminder(afterCancel), null, "no renewal reminder once cancelled");
-  assert.equal((await subs.cancelRenewal({ ledger, projection, user: s })).already, true, "second cancel is a no-op");
-  const { rows: cancels } = await pool.query("SELECT source FROM commerce_ledger WHERE user_id=$1 AND event_type='SUBSCRIPTION_CANCELLED'", [s.id]);
+  assert.equal((await subs.cancelRenewal({ ledger, projection, catalog, user: s })).already, true, "second cancel is a no-op");
+  assert.equal(refundCalls.length, 1, "and refunds nothing more");
+  const { rows: cancels } = await pool.query("SELECT source, reason FROM commerce_ledger WHERE user_id=$1 AND event_type='SUBSCRIPTION_CANCELLED'", [s.id]);
   assert.deepEqual(cancels.map((r) => r.source), ["CUSTOMER"]);
+  assert.match(cancels[0].reason, /renewal refunded/);
+  st = await subs.passState({ ledger, projection, userId: s.id });
+  assert.equal(st.canRenew, true, "Renew is offered again after the renewal was cancelled");
+  console.log("[ok] M4 cancel renewal with a paid renewal: that renewal refunded in full, current period kept, Not renewing, Renew offered again");
+
+  // Without a renewal paid in advance Cancel renewal is only the flag (no refund).
+  const sf = await newUser("subflag");
+  const pf = { ...paymentFor(null, sf, Math.round(subProduct.price * 100)) };
+  {
+    const oid = (await pool.query(`INSERT INTO orders (user_id, subtotal_cents, final_payable_cents, provider, status) VALUES ($1,$2,$2,$3,'PENDING') RETURNING id`, [sf.id, Math.round(subProduct.price * 100), PROVIDER])).rows[0].id;
+    await pool.query(`INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal) VALUES ($1,'SUBSCRIPTION',$2,$3,1,30,'ALL_ACCESS',$3,false)`, [oid, subProduct.id, Math.round(subProduct.price * 100)]);
+    pf.notes = { orderId: oid, orderRef: oid, userId: sf.id, productId: subProduct.id };
+    await captured(pf);
+  }
+  const before = refundCalls.length;
+  const cf = await subs.cancelRenewal({ ledger, projection, catalog, user: sf });
+  assert.equal(cf.ok, true);
+  assert.equal(refundCalls.length, before, "no renewal paid in advance -> nothing refunded");
+  assert.ok(subs.activePass(projection, sf.id).cancelledAt);
+  console.log("[ok] M4 cancel renewal without a paid renewal: only stops renewing, access to the end date");
+
+  // ---- Paying again turns renewal back on; then a full Refund refunds every payment of the pass
   const p3 = subPay(await subOrder(subs.isRenewal(projection, s.id, "ALL_ACCESS")));
   await captured(p3);
   assert.equal(subs.activePass(projection, s.id).cancelledAt, null, "paying again turns renewal back on");
-  console.log("[ok] M4 cancel: access kept until the end date, reminder off, recorded once (source CUSTOMER); renewing re-enables");
+  // A scholarship month stacked on the pass (free): ends with a full refund.
+  await ledger.appendEvent({
+    eventId: `admin_grant_${randomUUID()}`, eventType: "MANUAL_GRANT", userId: s.id, productId: subProduct.id, quantity: 1, amount: 0,
+    currency: "USD", occurredAt: new Date().toISOString(), source: "SCHOLARSHIP", actor: "m4test", reason: "test",
+    entitlement: { kind: "SUBSCRIPTION", scope: "ALL_ACCESS", durationDays: 30, expiresAt: null },
+  }, { method: "ADMIN_MANUAL_GRANT" });
+  assert.equal(subs.activePass(projection, s.id).periods.filter((x) => Date.parse(x.endsAt) > Date.now()).length, 3);
+
+  // A provider that refuses one payment: the other is still refunded; nothing free ends.
+  refuse = (a) => a.orderId === orderOf(p3);
+  const r0 = await subs.refundPass({ ledger, projection, catalog, user: s });
+  assert.equal(r0.ok, true);
+  assert.equal(r0.failed.length, 1);
+  assert.equal((await orderRow(orderOf(p3))).status, "COMPLETED", "a refused refund reopens its order");
+  assert.equal((await orderRow(orderOf(p1))).status, "REFUND_PENDING");
+  await refundHook(p1);
+  assert.ok(subs.activePass(projection, s.id), "pass still active: the renewal was not refunded");
+  assert.equal(subs.activePass(projection, s.id).periods.filter((x) => x.grantedVia === "MANUAL_GRANT" && Date.parse(x.endsAt) > Date.now()).length, 1, "scholarship kept while a payment is still unrefunded");
+  console.log("[ok] M4 full refund, one payment refused: the other is refunded, the refused order reopens, free time stays");
+
+  refuse = null;
+  const callsBefore = refundCalls.length;
+  const r1 = await subs.refundPass({ ledger, projection, catalog, user: s });
+  assert.equal(r1.ok, true);
+  assert.deepEqual(refundCalls.slice(callsBefore).map((c) => c.orderId), [orderOf(p3)], "the rest of the pass");
+  assert.deepEqual(await orderRow(orderOf(p3)), { status: "REFUND_PENDING", refund_scope: "PASS_FULL" });
+  assert.ok(subs.activePass(projection, s.id), "access kept until the provider confirms");
+  await refundHook(p3);
+  assert.equal(subs.activePass(projection, s.id), null, "no paid or free time left");
+  assert.equal(decisions.evaluateAccess(s.id, course.id).allowed, false, "every course of the pass is gone");
+  const ended = (await pool.query("SELECT source, reason FROM commerce_ledger WHERE user_id=$1 AND event_type='MANUAL_REVOKE'", [s.id])).rows;
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].source, "SYSTEM");
+  assert.match(ended[0].reason, /scholarship period ended/);
+  assert.equal((await refundHook(p3)).outcome, "DUPLICATE", "a replayed refund webhook changes nothing");
+  console.log("[ok] M4 full refund: every payment of the pass refunded (one provider refund each); when all are confirmed the scholarship time ends too");
+
+  // Both at once from the start: original + renewal in one Refund click.
+  const s2 = await newUser("sub2");
+  const mk = async (renewal) => {
+    const oid = (await pool.query(`INSERT INTO orders (user_id, subtotal_cents, final_payable_cents, provider, status) VALUES ($1,$2,$2,$3,'PENDING') RETURNING id`, [s2.id, Math.round(subProduct.price * 100), PROVIDER])).rows[0].id;
+    await pool.query(`INSERT INTO order_line_items (order_id, item_type, item_id, unit_price_cents, quantity, duration_days, scope, paid_cents, renewal) VALUES ($1,'SUBSCRIPTION',$2,$3,1,30,'ALL_ACCESS',$3,$4)`, [oid, subProduct.id, Math.round(subProduct.price * 100), renewal]);
+    const pay = paymentFor(oid, s2, Math.round(subProduct.price * 100));
+    pay.notes = { orderId: oid, orderRef: oid, userId: s2.id, productId: subProduct.id };
+    await captured(pay);
+    return pay;
+  };
+  const q1 = await mk(false);
+  const q2 = await mk(true);
+  const c0 = refundCalls.length;
+  const r2 = await subs.refundPass({ ledger, projection, catalog, user: s2 });
+  assert.deepEqual(r2.failed, []);
+  assert.deepEqual(refundCalls.slice(c0).map((c) => c.orderId).sort(), [orderOf(q1), orderOf(q2)].sort(), "both payments in one click");
+  await refundHook(q2);
+  assert.ok(subs.activePass(projection, s2.id), "still active until the last part is confirmed");
+  await refundHook(q1);
+  assert.equal(subs.activePass(projection, s2.id), null);
+  console.log("[ok] M4 Refund with original + renewal: both refunded in one click, access ends when the last is confirmed");
+  PaymentService.prototype.initiateRefund = realRefund;
 
   const fakeEnt = { cancelledAt: null, expiresAt: new Date(Date.now() + 3 * 86400e3).toISOString() };
   assert.equal(subs.renewalReminder(fakeEnt), 3);

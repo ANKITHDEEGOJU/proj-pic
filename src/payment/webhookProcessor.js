@@ -209,11 +209,17 @@ class WebhookProcessor {
               }
             }
 
-            // Mark order header as COMPLETED (a failed attempt leaves it PENDING: the
-            // customer can still retry and pay the same Razorpay order).
+            // Mark the order header COMPLETED, or FAILED for a failed attempt.
             if (!isFailed) {
               await pool.query(
                 "UPDATE orders SET status='COMPLETED', updated_at=now() WHERE id=$1",
+                [orderId]
+              );
+            } else {
+              // A failed attempt marks a still-pending order FAILED. A successful retry of the
+              // same provider order (Razorpay allows that) still sets it COMPLETED above.
+              await pool.query(
+                "UPDATE orders SET status='FAILED', updated_at=now() WHERE id=$1 AND status='PENDING'",
                 [orderId]
               );
             }
@@ -294,6 +300,11 @@ class WebhookProcessor {
             orderId,
             reason: commerceEvent.eventType === 'CHARGEBACK' ? 'Seat pack charged back' : 'Seat pack refunded',
           });
+          // A full pass refund: once its last order is refunded, the pass's free periods end too.
+          if (appendedAny && commerceEvent.eventType === 'REFUND') {
+            const o = (await pool.query('SELECT user_id, refund_scope FROM orders WHERE id::text = $1', [String(orderId)])).rows[0];
+            if (o?.refund_scope === 'PASS_FULL') await require('../services/subscriptions').finishPassRefund({ ledger: this.ledger, userId: o.user_id });
+          }
         }
       } catch (e) {
         const st = await this.markFailed(id, e.message);

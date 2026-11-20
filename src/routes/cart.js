@@ -3,7 +3,10 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
-const { isRenewal } = require("../services/subscriptions");
+const { subDurationLabel } = require('../domain/util');
+const { isRenewal, renewBlocked } = require("../services/subscriptions");
+const checkoutOnce = require("../services/checkoutOnce");
+const { randomUUID } = require("node:crypto");
 const { subscriptionCard, courseCard, layout, esc, navCart } = require('../views');
 const { resolveSubscriptionPrice, validateCoupon, allocatePaidCents } = require('../services/pricingEngine');
 const { PaymentService } = require('../payment/service');
@@ -126,8 +129,9 @@ function renderCartSummary(subtotalCents, couponResult, couponCode) {
         ${couponMsg}
       </div>
 
-      <form hx-post="/cart/checkout" hx-target="#checkout-err" hx-swap="innerHTML" style="text-align: right;">
+      <form hx-post="/cart/checkout" hx-target="#checkout-err" hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]" style="text-align: right;">
         <input type="hidden" name="couponCode" value="${esc(couponCode || '')}">
+        <input type="hidden" name="checkoutKey" value="${randomUUID()}">
 
         <p style="font-size: 1rem; margin-bottom: 0.25rem; color: #5B5F6E;">
           Subtotal: <strong>$${formattedSubtotal} USD</strong>
@@ -222,7 +226,7 @@ router.get('/cart', requireAuth, async (req, res) => {
         const isItemSub = item.type === 'SUBSCRIPTION';
 
         const displayType = isItemSub
-          ? `${item.durationDays || 30}-Day Subscription Pass`
+          ? `Subscription Pass (${subDurationLabel(item.durationDays || 30)})`
           : 'One-Time Purchase';
 
         const formattedPrice = ((item.priceCents || 0) / 100).toFixed(2);
@@ -330,6 +334,14 @@ router.post('/cart/checkout', async (req, res) => {
   const body = req.body || {};
   const provider = body.provider === 'razorpay' ? 'razorpay' : 'mock';
 
+  // A repeated submit of the same cart page (double click, retry) goes to the same checkout.
+  const checkoutKey = checkoutOnce.validKey(body.checkoutKey);
+  const earlier = await checkoutOnce.find(userId, checkoutKey);
+  if (earlier) {
+    const again = await checkoutOnce.repeatAnswer(earlier);
+    return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+  }
+
   const client = await pool.connect();
   let inTransaction = false;
 
@@ -337,7 +349,32 @@ router.post('/cart/checkout', async (req, res) => {
     const { isSub, cartItems, subtotalCents } = await getCartData(userId, req.user, catalog);
 
     if (cartItems.length === 0) {
+      // The same click may have just emptied the cart (it is cleared with its order).
+      const first = await checkoutOnce.find(userId, checkoutKey);
+      if (first) {
+        const again = await checkoutOnce.repeatAnswer(first);
+        return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+      }
       return res.status(400).send('<span style="color:#d32f2f;">Your cart is empty.</span>');
+    }
+
+    // Re-check ownership at payment time: the course may have been bought in another tab
+    // (or added before this check existed). Owned courses are dropped from the cart.
+    const { decisions } = req.app.locals.engine;
+    const owned = cartItems.filter((i) => i.item_type !== 'SUBSCRIPTION' && decisions?.evaluateAccess(userId, i.product_id)?.allowed);
+    if (owned.length > 0) {
+      await pool.query('DELETE FROM cart_items WHERE user_id = $1 AND product_id = ANY($2::text[])', [userId, owned.map((i) => i.product_id)]);
+      const names = owned.map((i) => esc(i.name || i.title || i.product_id)).join(', ');
+      // 200 so htmx shows it in #checkout-err (htmx does not swap 4xx responses by default).
+      return res.set('HX-Trigger', 'cartUpdated')
+        .send(`<span style="color:#d32f2f;">You already own ${names}. It was removed from your cart and nothing was charged. <a href="/cart">Reload the cart</a></span>`);
+    }
+
+    // One renewal at a time: no second renewal while one is paid in advance or being paid.
+    const subLine = cartItems.find((i) => i.item_type === 'SUBSCRIPTION');
+    if (subLine) {
+      const blocked = await renewBlocked({ ledger: req.app.locals.engine.ledger, projection: req.app.locals.engine.projection, userId, scope: subLine.scope || 'ALL_ACCESS' });
+      if (blocked) return res.send(`<span style="color:#d32f2f;">${esc(blocked)} Nothing was charged.</span>`);
     }
 
     let discountCents = 0;
@@ -359,13 +396,22 @@ router.post('/cart/checkout', async (req, res) => {
     await client.query('BEGIN');
     inTransaction = true;
 
+    // Same key submitted at the same moment: the second one waits here, then finds the first order.
+    const sameClick = await checkoutOnce.claim(client, userId, checkoutKey);
+    if (sameClick) {
+      await client.query('ROLLBACK');
+      inTransaction = false;
+      const again = await checkoutOnce.repeatAnswer(sameClick);
+      return again.redirectUrl ? res.set('HX-Redirect', again.redirectUrl).end() : res.send(`<span style="color:#d32f2f;">${esc(again.message)}</span>`);
+    }
+
     const orderRes = await client.query(
       `INSERT INTO orders (
         user_id, subtotal_cents, discount_cents, final_payable_cents,
-        applied_rule_id, provider, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
+        applied_rule_id, provider, status, checkout_key
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
       RETURNING id`,
-      [userId, subtotalCents, discountCents, finalPayableCents, appliedRuleId, provider]
+      [userId, subtotalCents, discountCents, finalPayableCents, appliedRuleId, provider, checkoutKey]
     );
 
     const orderId = orderRes.rows[0].id;
@@ -412,6 +458,7 @@ router.post('/cart/checkout', async (req, res) => {
       orderId,
       provider,
     });
+    await checkoutOnce.rememberUrl(orderId, redirectUrl);
 
     res.status(200).set('HX-Redirect', redirectUrl || '/courses').end();
   } catch (err) {
@@ -426,6 +473,33 @@ router.post('/cart/checkout', async (req, res) => {
 });
 
 // GET /cart/count
+// GET /checkout/cancelled?ref=<orderId> - the customer left the provider's checkout without
+// paying (mock "Cancel", Razorpay modal closed). The order is marked CANCELLED and its items go
+// back into the cart so they can try again. A payment that still arrives later wins: the
+// webhook sets the order COMPLETED regardless.
+router.get('/checkout/cancelled', requireAuth, async (req, res) => {
+  const ref = String(req.query.ref || '');
+  if (/^[0-9a-f-]{36}$/i.test(ref)) {
+    const { rows } = await pool.query(
+      `UPDATE orders SET status='CANCELLED', updated_at=now()
+        WHERE id=$1 AND user_id=$2 AND status IN ('PENDING','FAILED') RETURNING id`,
+      [ref, req.user.id]
+    );
+    if (rows[0]) {
+      const { rowCount } = await pool.query(
+        `INSERT INTO cart_items (user_id, product_id)
+         SELECT $2, item_id FROM order_line_items WHERE order_id=$1 AND item_type IN ('COURSE','SUBSCRIPTION')
+         ON CONFLICT DO NOTHING`,
+        [ref, req.user.id]
+      );
+      if (rowCount) return res.redirect('/cart');
+    }
+  }
+  // back=org: a seat-pack checkout, return to the organization page.
+  if (req.query.back === 'org') return res.redirect('/org?checkout=cancelled');
+  res.redirect('/courses');
+});
+
 router.get('/cart/count', requireAuth, async (req, res) => {
   try {
     const countRes = await pool.query('SELECT COUNT(*) FROM cart_items WHERE user_id = $1', [
@@ -458,6 +532,12 @@ router.post('/cart/add', requireAuth, async (req, res) => {
 
   const storedProductId = catalogProduct.slug || catalogProduct.id;
   const isSubscription = catalogProduct.type === 'SUBSCRIPTION';
+
+  // A course the user can already open must not be bought again (the page hides the button,
+  // but a stale tab or a direct request can still post here). Passes are renewals, not repeats.
+  if (!isSubscription && decisions?.evaluateAccess(userId, storedProductId)?.allowed) {
+    return res.send(courseCard(catalogProduct, decisions.evaluateAccess(userId, storedProductId), 'You already own this course.'));
+  }
 
   const client = await pool.connect();
   try {

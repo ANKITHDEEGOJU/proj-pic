@@ -38,6 +38,8 @@ class Reconciler {
     adapters = registry,
     lookbackDays = Number(process.env.RECON_LOOKBACK_DAYS || 7),
     stuckMinutes = Number(process.env.RECON_STUCK_REFUND_MINUTES || 15),
+    // Orders left PENDING this long (checkout abandoned, payment never made) become EXPIRED.
+    pendingExpiryMinutes = Number(process.env.ORDER_PENDING_EXPIRY_MINUTES || 60),
     // Events younger than this are left alone: their webhook is probably still on its way.
     graceSeconds = Number(process.env.RECON_GRACE_SECONDS || 120),
     log = console,
@@ -47,6 +49,7 @@ class Reconciler {
     this.providers = Object.keys(adapters);
     this.lookbackDays = lookbackDays;
     this.stuckMinutes = stuckMinutes;
+    this.pendingExpiryMinutes = pendingExpiryMinutes;
     this.graceSeconds = graceSeconds;
     this.log = log;
     this.processor = new WebhookProcessor({ ledger });
@@ -76,6 +79,7 @@ class Reconciler {
       }
       await this.#stuckRefundPending(ctx);
       await this.#databaseChecks(ctx);
+      await this.#expireStalePending(ctx);
       await this.#autoResolve(ctx);
     } catch (e) {
       error = e.message || String(e);
@@ -86,6 +90,8 @@ class Reconciler {
       checked: ctx.checked,
       fixed: ctx.fixed.length,
       openIssues: ctx.issues.length,
+      expiredOrders: ctx.expiredOrders || 0,
+      acknowledged: ctx.acknowledged || 0, // found again, but already resolved by an admin
       byKind: [...ctx.fixed, ...ctx.issues].reduce((m, x) => ((m[x.kind] = (m[x.kind] || 0) + 1), m), {}),
     };
     await pool.query('UPDATE recon_runs SET finished_at=now(), summary=$2, error=$3 WHERE id=$1', [
@@ -227,7 +233,7 @@ class Reconciler {
 
     // Only move PENDING -> COMPLETED and COMPLETED/PENDING/REFUND_PENDING -> REFUNDED/CHARGED_BACK.
     // REFUND_PENDING with nothing reversed is the stuck-refund check's job; REFUND_FAILED needs a human.
-    const from = expected === 'COMPLETED' ? ['PENDING'] : ['PENDING', 'COMPLETED', 'REFUND_PENDING'];
+    const from = expected === 'COMPLETED' ? ['PENDING', 'FAILED', 'EXPIRED', 'CANCELLED'] : ['PENDING', 'COMPLETED', 'REFUND_PENDING'];
     const { rows } = await pool.query(
       `UPDATE orders o SET status=$2, updated_at=now()
          FROM (SELECT status AS old FROM orders WHERE id=$1) prev
@@ -329,6 +335,18 @@ class Reconciler {
     }
   }
 
+  // Runs after the provider checks, so an order that was actually paid is COMPLETED by now.
+  // A payment that still arrives later sets the order COMPLETED (webhook / ORDER_STATUS fix).
+  async #expireStalePending(ctx) {
+    if (!(this.pendingExpiryMinutes > 0)) return;
+    const { rowCount } = await pool.query(
+      `UPDATE orders SET status='EXPIRED', updated_at=now()
+        WHERE status='PENDING' AND created_at < now() - make_interval(mins => $1)`,
+      [this.pendingExpiryMinutes]
+    );
+    ctx.expiredOrders = rowCount;
+  }
+
   async #autoResolve(ctx) {
     const seen = [...ctx.seen];
     await pool.query(
@@ -399,6 +417,24 @@ class Reconciler {
 
   async #issue(ctx, kind, ref, { provider = null, orderId = null, details = {} } = {}) {
     ctx.seen.add(`${kind}|${ref}`);
+    // An admin already resolved this exact issue (same details): don't reopen it every run.
+    // If the details change (e.g. a second partial refund), it is reported again.
+    const { rowCount: acknowledged } = await pool.query(
+      `SELECT 1 FROM recon_issues WHERE kind=$1 AND ref=$2 AND status='RESOLVED'
+          AND resolved_by LIKE 'admin:%' AND details = $3::jsonb LIMIT 1`,
+      [kind, ref, details]
+    );
+    if (acknowledged) {
+      ctx.acknowledged = (ctx.acknowledged || 0) + 1;
+      // A copy opened before the admin's decision (or by an older run) is closed too.
+      await pool.query(
+        `UPDATE recon_issues SET status='RESOLVED', resolved_at=now(), resolved_by='recon:auto',
+                note='Same issue was already resolved by an admin'
+          WHERE kind=$1 AND ref=$2 AND status='OPEN'`,
+        [kind, ref]
+      );
+      return;
+    }
     await pool.query(
       `INSERT INTO recon_issues (kind, provider, ref, order_id, details, status, first_run_id, last_run_id)
        VALUES ($1, $2, $3, $4, $5, 'OPEN', $6, $6)

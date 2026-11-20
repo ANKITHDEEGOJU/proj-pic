@@ -47,3 +47,15 @@ const SOURCES = Object.freeze(['PAYMENT', 'ADMIN', 'SCHOLARSHIP', 'ORG_SEAT', 'S
 module.exports.EVENT_EFFECT = EVENT_EFFECT;
 module.exports.NEEDS_REFERENCE = NEEDS_REFERENCE;
 module.exports.SOURCES = SOURCES;
+
+// M8 demo switch: SUB_DURATION_MINUTES=N makes every subscription period last N minutes
+// instead of its durationDays, so expiry can be shown in a walkthrough. Unset = normal days.
+// It changes only how long a period is when access is calculated; the ledger is untouched.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const demoSubMinutes = () => {
+  const m = Number(process.env.SUB_DURATION_MINUTES);
+  return Number.isFinite(m) && m > 0 ? m : null;
+};
+module.exports.demoSubMinutes = demoSubMinutes;
+module.exports.subPeriodMs = (days) => (demoSubMinutes() ? demoSubMinutes() * 60 * 1000 : days * DAY_MS);
+module.exports.subDurationLabel = (days) => (demoSubMinutes() ? `${demoSubMinutes()} min (demo)` : `${days} days`);

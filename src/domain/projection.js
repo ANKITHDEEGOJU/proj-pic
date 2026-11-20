@@ -1,6 +1,6 @@
 "use strict";
 
-const { deepFreeze, EVENT_EFFECT } = require("./util");
+const { deepFreeze, EVENT_EFFECT, subPeriodMs } = require("./util");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -178,7 +178,7 @@ class EntitlementProjectionEngine {
       const startMs = Math.max(Date.parse(p.occurredAt), endMs ?? -Infinity);
       const periodEndMs = p.fixedExpiresAt
         ? Date.parse(p.fixedExpiresAt)
-        : startMs + p.durationDays * DAY_MS;
+        : startMs + subPeriodMs(p.durationDays);
       endMs = Math.max(endMs ?? -Infinity, periodEndMs);
       return {
         eventId: p.eventId, productId: p.productId, grantedVia: p.grantedVia, source: p.source,

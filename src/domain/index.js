@@ -11,6 +11,8 @@ function createEngine({ products, userExists = id => typeof id === 'string' && i
   // console.log(catalog.list()) --Catalog is created
   const ledger = new CommerceLedgerService({ catalog, userExists, store });
   const projection = new EntitlementProjectionEngine(ledger);
+  // Lets services that only get the ledger (webhook processor) read the current entitlements.
+  ledger.projection = projection;
   const decisions = new EntitlementDecisionEngine(projection);
   return { catalog, ledger, projection, decisions };
 }

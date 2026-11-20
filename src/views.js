@@ -1,5 +1,7 @@
 'use strict';
 
+const { subDurationLabel, demoSubMinutes } = require('./domain/util');
+
 const esc = (s) =>
   String(s ?? '').replace(
     /[&<>"']/g,
@@ -26,7 +28,7 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 
   body {
     font-family:'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Courier New', monospace;;
-    max-width: 850px;
+    max-width: 1100px;
     margin: 2rem auto;
     padding: 0 1.5rem;
     background: #F6F5F0;
@@ -38,6 +40,8 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
   
   nav {
     display: flex;
+    flex-wrap: wrap;          /* long menus (admin) wrap instead of pushing the page sideways */
+    gap: 0.75rem 1rem;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 2.5rem;
@@ -66,6 +70,8 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
     transition: color 0.2s;
   }
   nav a:hover { color: #2743D8; }
+  nav > span { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0; }
+  nav > span.nav-user { gap: 0.5rem 1rem; color: #5B5F6E; }
   
   /* Inputs */
   input, select {
@@ -177,13 +183,25 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
     color: #1C1E26;
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.85rem;
+    overflow-wrap: anywhere;  /* long ids wrap inside the cell instead of widening the table */
   }
+
+  /* Paged tables: search box + "Show more" */
+  .table-tools { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.75rem; }
+  .table-tools input[type=search] { flex: 1 1 18rem; width: auto; margin: 0; }
+  .table-tools small { color: #5B5F6E; }
+  tr.more-row td { text-align: center; }
+  td.nowrap { white-space: nowrap; overflow-wrap: normal; }
+  /* Wide tables scroll inside their own box on narrow screens, never the whole page */
+  .table-wrap { overflow-x: auto; margin-bottom: 2rem; }
+  .table-wrap table { margin-bottom: 0; }
+  tr.more-row button { margin: 0; }
 </style></head><body>
 <nav>
 <span>
 <strong style="font-family: 'monospace';"><i>LearnX</i></strong>
 ${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a><a href="/agent">Agent</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
-${user ? `<span>${esc(user.email)} <button hx-post="/logout">Logout</button></span>` : ''}
+${user ? `<span class="nav-user">${esc(user.email)}<button hx-post="/logout">Logout</button></span>` : ''}
 </nav>
 ${body}</body></html>`;
 
@@ -198,6 +216,16 @@ const authForm = (kind) => `
 <p>${kind === 'login' ? '<a href="/register">Need an account?</a>' : '<a href="/login">Have an account?</a>'}</p>`;
 
 const FREE_GRANTS = ['MANUAL_GRANT', 'SEAT_ASSIGNED'];
+
+// "3 days" normally; with the demo period (SUB_DURATION_MINUTES) the pass lasts minutes, so the
+// warning counts minutes instead of rounding up to "1 day".
+const endsIn = (ent, daysLeft) => {
+  if (demoSubMinutes() && ent?.expiresAt) {
+    const m = Math.max(1, Math.ceil((new Date(ent.expiresAt) - Date.now()) / 60000));
+    return `${m} minute${m === 1 ? '' : 's'}`;
+  }
+  return `${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+};
 
 const courseCard = (p, d, msg = '', pending = false, inCart = false) => {
   const s = esc(p.slug || p.id),
@@ -255,6 +283,7 @@ ${
     : (inCart
       ? `<a href="/cart" style="text-decoration:none"><button class="alt">In Cart · View Cart →</button></a>`
       : `<button hx-post="/cart/add" hx-vals='{"productId": "${s}"}' ${t}>Add to Cart</button>`)
+
       + (msg ? `<div class="msg">${esc(msg)}</div>` : '') // e.g. "Refund processed. Access revoked."
 }
 </div>`;
@@ -265,7 +294,7 @@ const subscriptionCard = (
   subPriceInfo = null,
   isSubActive = false,
   subEnt = null,
-  opts = {} // { refundPending, message }
+  opts = {} // { refundPending, renewalPending, queuedUntil, paidPeriods, message }
 ) => {
   const id = 'sub-card';
   const targetAttr = `hx-target="#${id}" hx-swap="outerHTML"`;
@@ -281,7 +310,7 @@ const subscriptionCard = (
   // Active Subscription View (Post-Purchase)
   if (isSubActive) {
     const expStr = subEnt?.expiresAt
-      ? new Date(subEnt.expiresAt).toLocaleDateString()
+      ? (demoSubMinutes() ? new Date(subEnt.expiresAt).toLocaleString() : new Date(subEnt.expiresAt).toLocaleDateString())
       : 'Lifetime';
 
     // Not refundable only when no period was paid for (all free grants).
@@ -294,8 +323,9 @@ const subscriptionCard = (
   <div style="font-size:0.85rem;color:#5B5F6E;">Waiting for the payment provider to confirm. Access stays until then.</div>`
         : `<form hx-post="/courses/${subProductId}/checkout/refund" ${targetAttr} style="margin-top: 0.5rem;">
     <button type="submit" style="background: #d32f2f; color: #ffffff; border: none; padding: 0.5rem 1.2rem; border-radius: 4px; font-weight: bold; cursor: pointer;">
-      Refund Subscription
+      ${opts.paidPeriods > 1 ? `Refund Subscription (all ${opts.paidPeriods} payments)` : 'Refund Subscription'}
     </button>
+    <div style="font-size:0.8rem;color:#5B5F6E;margin-top:0.25rem;">Refunds every payment of your current pass${opts.queuedUntil ? ', including the renewal' : ''}; any free or scholarship time on it ends too.</div>
   </form>`;
     const trigger = opts.refundPending ? 'every 2s, cartUpdated from:body' : 'cartUpdated from:body';
 
@@ -303,19 +333,28 @@ const subscriptionCard = (
     // end); Cancel renewal keeps access until the end date and stops the reminder.
     const { renewalReminder } = require('./services/subscriptions');
     const daysLeft = renewalReminder(subEnt);
-    const lifecycleNote = subEnt?.cancelledAt
-      ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Renewal cancelled on ${new Date(subEnt.cancelledAt).toLocaleDateString()}. You keep access until <strong>${expStr}</strong>.</p>`
+    // One renewal at a time: once a renewal is paid (or being paid) there is no Renew button,
+    // only Cancel renewal (refunds that renewal in full) and Refund (the whole pass).
+    const canRenew = !opts.queuedUntil && !opts.renewalPending;
+    const lifecycleNote = opts.refundPending
+      ? ''
+      : subEnt?.cancelledAt
+      ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Renewal cancelled on ${new Date(subEnt.cancelledAt).toLocaleDateString()}. You keep access until the date above.</p>`
+      : opts.queuedUntil
+        ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#1b5e20;">Renewed: your next period is already paid (included in the date above). Cancel renewal refunds that renewal in full.</p>`
+      : opts.renewalPending
+        ? '<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Renewal payment in progress. Finish it on the payment page.</p>'
       : daysLeft
-        ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Your pass ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}. Renew to keep watching.</p>`
+        ? `<p style="margin:0 0 0.5rem 0;font-size:0.85rem;color:#8a4b00;">Your pass ends in ${endsIn(subEnt, daysLeft)}. Renew to keep watching.</p>`
         : '';
     const lifecycleButtons = opts.refundPending ? '' : `
   <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem;">
-    <button type="button" hx-post="/subscription/renew" hx-vals='{"productId":"${subProductId}"}' style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:4px;font-weight:bold;cursor:pointer;">Renew (+${durationDays} days)</button>
-    ${subEnt?.cancelledAt ? '' : `<button type="button" class="alt" hx-post="/subscription/cancel" ${targetAttr} style="padding:0.5rem 1.2rem;border-radius:4px;cursor:pointer;">Cancel renewal</button>`}
+    ${canRenew ? `<button type="button" hx-post="/subscription/renew" hx-vals='{"productId":"${subProductId}"}' style="background:#2e7d32;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:4px;font-weight:bold;cursor:pointer;">Renew (+${subDurationLabel(durationDays)})</button>` : ''}
+    ${subEnt?.cancelledAt ? '' : `<button type="button" class="alt" hx-post="/subscription/cancel" ${targetAttr} style="padding:0.5rem 1.2rem;border-radius:4px;cursor:pointer;">${opts.queuedUntil ? 'Cancel renewal (refund it)' : 'Cancel renewal'}</button>`}
   </div>`;
 
     return `
-<div class="card" id="${id}" hx-get="/courses/subscription-banner" hx-trigger="${trigger}" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
+<div class="card" id="${id}" hx-get="/courses/subscription-banner${opts.refundPending ? '?pending=1' : ''}" hx-trigger="${trigger}" hx-swap="outerHTML" style="border: 2px solid #2e7d32; background: #f1f8e9;">
   <div style="display: flex; justify-content: space-between; align-items: flex-start;">
     <div>
       <h3 style="margin-bottom: 0.25rem; color: #1b5e20;">✓ ${planTitle} (Active)</h3>
@@ -356,7 +395,7 @@ const subscriptionCard = (
       Best Value
     </span>
   </div>
-  <strong style="font-size: 1.1rem; color: #111;">$${formattedPrice} ${currencyStr} / ${durationDays} days</strong><br><br>
+  <strong style="font-size: 1.1rem; color: #111;">$${formattedPrice} ${currencyStr} / ${subDurationLabel(durationDays)}</strong><br><br>
   ${
     inCart
       ? `<a href="/cart" style="text-decoration: none;"><button class="alt">In Cart · View Cart →</button></a>
@@ -376,6 +415,43 @@ const accessFragment = (d) =>
     ? `<span class="ok">▶ Allowed</span> · ${esc(d.reason)} · source: ${d.sourceEventIds.map(esc).join(', ')}`
     : `<span class="err">⛔ Denied</span> · ${esc(d.reason)}${d.sourceEventIds.length ? ' · source: ' + d.sourceEventIds.map(esc).join(', ') : ''}`;
 
+// ---- paged tables ------------------------------------------------------------------------
+// First load shows PAGE_SIZE rows; "Show more" swaps itself for the next rows (htmx), and the
+// search box replaces the table body with the first page of matches.
+const PAGE_SIZE = 10;
+
+const moreRow = ({ colspan, nextUrl, shown, total, q }) => {
+  if (shown < total)
+    return `<tr class="more-row"><td colspan="${colspan}"><button type="button" class="alt" hx-get="${esc(nextUrl)}"
+      hx-target="closest tr" hx-swap="outerHTML">Show more (${shown} of ${total}${q ? ' matches' : ''})</button></td></tr>`;
+  if (total === 0) return `<tr><td colspan="${colspan}">${q ? 'No matches' : 'None'}</td></tr>`;
+  return total > PAGE_SIZE ? `<tr class="more-row"><td colspan="${colspan}"><small>All ${total} shown</small></td></tr>` : '';
+};
+
+const searchBox = ({ url, target, placeholder, q = '' }) => `<div class="table-tools">
+  <input type="search" name="q" value="${esc(q)}" placeholder="${esc(placeholder)}" autocomplete="off"
+    hx-get="${esc(url)}" hx-trigger="input changed delay:300ms, search" hx-target="${esc(target)}" hx-swap="innerHTML">
+</div>`;
+
+const qs = (params) => new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null)).toString();
+
+const ledgerText = (r) => [r.ledgerSequenceId, r.event.eventType, r.event.source, r.event.reason, r.event.productId,
+  r.event.eventId, r.event.referenceeventId, r.event.currency].filter(Boolean).join(' ').toLowerCase();
+
+const ledgerRow = (r) =>
+  `<tr><td class="nowrap">${r.ledgerSequenceId}</td><td class="nowrap">${esc(r.event.eventType)}</td><td>${esc(r.event.source || 'PAYMENT')}${r.event.reason ? `<br><small>${esc(r.event.reason)}</small>` : ''}</td><td>${esc(r.event.productId)}</td><td class="nowrap">${(r.event.amount || 0).toFixed(2)} ${esc(r.event.currency || 'USD')}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || '')}</td></tr>`;
+
+// Rows of the user's ledger, newest first, filtered by q, one page from offset.
+const ledgerRows = (records, { q = '', offset = 0 } = {}) => {
+  const needle = String(q).trim().toLowerCase();
+  const list = records.slice().sort((a, b) => b.ledgerSequenceId - a.ledgerSequenceId)
+    .filter((r) => !needle || ledgerText(r).includes(needle));
+  const page = list.slice(offset, offset + PAGE_SIZE);
+  const shown = offset + page.length;
+  return page.map(ledgerRow).join('') +
+    moreRow({ colspan: 7, nextUrl: `/activity/ledger?${qs({ q: needle, offset: shown })}`, shown, total: list.length, q: needle });
+};
+
 const activityPage = (records, ents) => `<h2>Entitlements</h2>
 <table><tr><th>Product / Scope</th><th>Status</th><th>Source Event</th><th>Granted</th><th>Expires</th></tr>
 ${
@@ -388,15 +464,10 @@ ${
     .join('') || '<tr><td colspan="5">None</td></tr>'
 }</table>
 <h2>Ledger (append-only)</h2>
-<table><tr><th>#</th><th>Type</th><th>Source</th><th>Product</th><th>Amount</th><th>Event</th><th>Refs</th></tr>
-${
-  records
-    .map(
-      (r) =>
-        `<tr><td>${r.ledgerSequenceId}</td><td>${esc(r.event.eventType)}</td><td>${esc(r.event.source || 'PAYMENT')}${r.event.reason ? `<br><small>${esc(r.event.reason)}</small>` : ''}</td><td>${esc(r.event.productId)}</td><td>${(r.event.amount || 0).toFixed(2)} ${esc(r.event.currency || 'USD')}</td><td>${esc(r.event.eventId)}</td><td>${esc(r.event.referenceeventId || '')}</td></tr>`
-    )
-    .join('') || '<tr><td colspan="7">No events</td></tr>'
-}</table>`;
+<p><small>Newest first. ${records.length} event(s) in total.</small></p>
+${searchBox({ url: '/activity/ledger', target: '#ledger-rows', placeholder: 'Search type, product, event id, source, reason…' })}
+<table><thead><tr><th>#</th><th>Type</th><th>Source</th><th>Product</th><th>Amount</th><th>Event</th><th>Refs</th></tr></thead>
+<tbody id="ledger-rows">${ledgerRows(records)}</tbody></table>`;
 
 const QUOTA_KIND_LABEL = {
   USER: 'your daily allowance',
@@ -430,6 +501,11 @@ module.exports = {
   accessFragment,
   aiSummaryPanel,
   activityPage,
+  ledgerRows,
+  moreRow,
+  searchBox,
+  qs,
+  PAGE_SIZE,
   errorFragment,
   esc,
 };

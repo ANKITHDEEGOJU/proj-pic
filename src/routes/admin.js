@@ -3,7 +3,7 @@
 const router = require('express').Router();
 const { randomUUID } = require('node:crypto');
 const pool = require('../db');
-const { layout, esc } = require('../views');
+const { layout, esc, moreRow, searchBox, qs, PAGE_SIZE } = require('../views');
 const { getRuleStatus } = require('../services/pricingEngine');
 
 // Helper to look up catalog item by id or slug safely
@@ -71,6 +71,12 @@ router.get('/admin', requireAdmin, async (req, res) => {
         </div>
 
         <div class="card">
+          <h3>Assistant Log</h3>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Every LEARNX Assistant chat turn: messages, replies, tools used, errors, limits and token use.</p>
+          <a href="/admin/assistant"><button class="alt">Open Assistant Log →</button></a>
+        </div>
+
+        <div class="card">
           <h3>Pricing Rules & Coupons</h3>
           <p style="color: #5B5F6E; margin-bottom: 1rem;">Configure pricing rules, discounts, domain overrides, and promo coupons.</p>
           <a href="/admin/pricing-rules"><button class="alt">Manage Pricing & Coupons →</button></a>
@@ -85,23 +91,28 @@ router.get('/admin', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /admin/users - User Entitlements Management
-router.get('/admin/users', requireAdmin, async (req, res) => {
-  const { catalog, projection } = req.app.locals.engine;
+// ---- admin user list (paged + searchable) ---------------------------------------------------
 
-  try {
-    const { rows: users } = await pool.query(
-      'SELECT id, email, created_at FROM users ORDER BY created_at DESC'
-    );
-
-    const projectionSnapshot = projection.snapshot();
-    const allProducts = catalog.list ? catalog.list() : [];
-
-    const productOptions = allProducts.map(p => `
+// One page of users matching q (email or id), newest first, as table rows + "Show more".
+async function adminUserRows(engine, { q = '', offset = 0 } = {}) {
+  const { catalog, projection } = engine;
+  const needle = String(q).trim().slice(0, 100);
+  const like = `%${needle.replace(/[\\%_]/g, '\\$&')}%`;
+  const { rows: users } = await pool.query(
+    `SELECT id, email, created_at, count(*) OVER () AS total FROM users
+      WHERE $1 = '' OR email ILIKE $2 OR id::text ILIKE $2
+      ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+    [needle, like, PAGE_SIZE, offset]
+  );
+  const total = users.length ? Number(users[0].total)
+    : Number((await pool.query(`SELECT count(*) FROM users WHERE $1 = '' OR email ILIKE $2 OR id::text ILIKE $2`, [needle, like])).rows[0].count);
+  const projectionSnapshot = projection.snapshot();
+  const allProducts = catalog.list ? catalog.list() : [];
+  const productOptions = allProducts.map(p => `
       <option value="${esc(p.slug || p.id)}">${esc(p.name || p.title || p.id)} (${p.type || 'COURSE'})</option>
     `).join('');
 
-const userRowsHtml = users.map(u => {
+  const html = users.map(u => {
       const userEntitlements = Object.values(projectionSnapshot).filter(
         ent => String(ent.userId) === String(u.id) && ent.status === 'ACTIVE'
       );
@@ -129,12 +140,13 @@ const userRowsHtml = users.map(u => {
 
       return `
         <tr>
-          <td><strong>${esc(u.email)}</strong><br><small style="color:#666">ID: ${esc(u.id)}</small></td>
+          <td style="min-width: 11rem;"><strong>${esc(u.email)}</strong><br><small style="color:#666">ID: ${esc(u.id)}</small></td>
           <td><small>${new Date(u.created_at).toLocaleDateString()}</small></td>
           <td style="vertical-align: middle;">${entitlementBadges}</td>
           <td>
-            <form action="/admin/users/grant" method="POST" style="display: flex; gap: 0.5rem; align-items: center;">
+            <form action="/admin/users/grant" method="POST" onsubmit="this.querySelector('button[type=submit]').disabled = true" style="display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
               <input type="hidden" name="userId" value="${esc(u.id)}">
+              <input type="hidden" name="grantKey" value="${randomUUID()}">
               <select name="productId" style="padding: 0.38rem; border-radius: 4px; border: 1px solid #ccc; font-size: 0.85rem;" required>
                 <option value="" disabled selected>Select course/sub...</option>
                 ${productOptions}
@@ -150,10 +162,17 @@ const userRowsHtml = users.map(u => {
         </tr>
       `;
     }).join('');
+  const shown = offset + users.length;
+  return html + moreRow({ colspan: 4, nextUrl: `/admin/users/rows?${qs({ q: needle, offset: shown })}`, shown, total, q: needle });
+}
 
+// GET /admin/users - User Entitlements Management
+router.get('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const userCount = Number((await pool.query('SELECT count(*) FROM users')).rows[0].count);
     const body = `
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <h2>User Management (${users.length} Users)</h2>
+      <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h2>User Management (${userCount} Users)</h2>
         <a href="/admin"><button class="alt">← Back to Admin Overview</button></a>
       </div>
 
@@ -164,7 +183,8 @@ const userRowsHtml = users.map(u => {
         </p>
       </div>
 
-      <table>
+      ${searchBox({ url: '/admin/users/rows', target: '#user-rows', placeholder: 'Search by email or user id…' })}
+      <div class="table-wrap"><table>
         <thead>
           <tr>
             <th>User</th>
@@ -173,16 +193,27 @@ const userRowsHtml = users.map(u => {
             <th>Grant Access</th>
           </tr>
         </thead>
-        <tbody>
-          ${userRowsHtml.length > 0 ? userRowsHtml : '<tr><td colspan="4" style="text-align:center; color:#666;">No users registered yet.</td></tr>'}
+        <tbody id="user-rows">
+          ${await adminUserRows(req.app.locals.engine)}
         </tbody>
-      </table>
+      </table></div>
     `;
 
     res.send(layout('Admin - User Management', body, req.user));
   } catch (err) {
     console.error('Error rendering admin users page:', err);
     res.status(500).send('Internal Server Error');
+  }
+});
+
+// GET /admin/users/rows?q=&offset= - htmx: next page / search results of the user table
+router.get('/admin/users/rows', requireAdmin, async (req, res) => {
+  try {
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    res.send(await adminUserRows(req.app.locals.engine, { q: req.query.q || '', offset }));
+  } catch (err) {
+    console.error('Error loading admin user rows:', err);
+    res.status(500).send('<tr><td colspan="4" class="err">Could not load users.</td></tr>');
   }
 });
 
@@ -208,9 +239,13 @@ router.post('/admin/users/grant', requireAdmin, async (req, res) => {
 
     // M1: a free grant is its own event type, not a $0 purchase.
     const source = req.body.source === 'SCHOLARSHIP' ? 'SCHOLARSHIP' : 'ADMIN';
-    await ledger.appendEvent(
+    // Idempotent: the form's one-time grantKey is the event id, so the same form submitted twice
+    // (double click, refresh, retry) records one grant; the ledger ignores the repeat
+    // (DUPLICATE_EVENT / EVENT_ID_CONFLICT, nothing appended).
+    const grantKey = /^[0-9a-f-]{36}$/i.test(String(req.body.grantKey || '')) ? String(req.body.grantKey) : randomUUID();
+    const out = await ledger.appendEvent(
       {
-        eventId: `admin_grant_${randomUUID()}`,
+        eventId: `admin_grant_${grantKey}`,
         eventType: 'MANUAL_GRANT',
         userId: String(userId),
         productId: targetProductId,
@@ -230,6 +265,7 @@ router.post('/admin/users/grant', requireAdmin, async (req, res) => {
       },
       { method: 'ADMIN_MANUAL_GRANT', grantedBy: req.user.email }
     );
+    if (out && out.appended === false) console.log(`[admin] grant ${grantKey} submitted again: ignored (${out.reason})`);
 
     res.redirect('/admin/users');
   } catch (err) {
@@ -432,7 +468,7 @@ router.get('/admin/pricing-rules', requireAdmin, async (req, res) => {
       </div>
 
       <h3>Existing Pricing Rules</h3>
-      <table>
+      <div class="table-wrap"><table>
         <thead>
           <tr>
             <th>Name / Code</th>
@@ -449,7 +485,7 @@ router.get('/admin/pricing-rules', requireAdmin, async (req, res) => {
         <tbody>
           ${rulesTableRows.length > 0 ? rulesTableRows : '<tr><td colspan="8" style="text-align:center; color:#666;">No pricing rules configured yet.</td></tr>'}
         </tbody>
-      </table>
+      </table></div>
     `;
 
     res.send(layout('Admin - Pricing Rules', body, req.user));
@@ -551,68 +587,103 @@ router.post('/admin/pricing-rules/:id/toggle', requireAdmin, async (req, res) =>
 const fmtTime = (t) => (t ? new Date(t).toLocaleString() : '-');
 const smallBtn = 'style="padding: 0.3rem 0.6rem; font-size: 0.8rem;"';
 
-router.get('/admin/reconciliation', requireAdmin, async (req, res) => {
-  try {
-    const [runs, open, fixed, inbox, stuckInbox] = await Promise.all([
-      pool.query('SELECT * FROM recon_runs ORDER BY id DESC LIMIT 10'),
-      pool.query("SELECT * FROM recon_issues WHERE status='OPEN' ORDER BY last_seen_at DESC LIMIT 200"),
-      pool.query("SELECT * FROM recon_issues WHERE status='AUTO_FIXED' ORDER BY id DESC LIMIT 50"),
-      pool.query('SELECT status, COUNT(*)::int AS n FROM webhook_inbox GROUP BY status ORDER BY status'),
-      pool.query(`SELECT id, provider, provider_event_id, status, attempts, next_retry_at, failure_reason
-                    FROM webhook_inbox WHERE status IN ('FAILED','DEAD','PROCESSING')
-                    ORDER BY received_at DESC LIMIT 50`),
-    ]);
-
-    const details = (d) => `<code style="font-size:0.75rem;white-space:pre-wrap">${esc(JSON.stringify(d))}</code>`;
-    const runRows = runs.rows.map((r) => `
-      <tr><td>#${r.id}</td><td>${esc(r.trigger)}</td><td>${fmtTime(r.started_at)}</td>
-        <td>${r.finished_at ? fmtTime(r.finished_at) : '<span style="color:#d29922">running…</span>'}</td>
-        <td>${r.error ? `<span class="err">${esc(r.error)}</span>` : details(r.summary)}</td></tr>`).join('');
-    const openRows = open.rows.map((i) => `
+// Reconciliation page tables: PAGE_SIZE rows each, "Show more" fetches the next page.
+const reconDetails = (d) => `<code style="font-size:0.75rem;white-space:pre-wrap">${esc(JSON.stringify(d))}</code>`;
+const RECON_TABLES = {
+  open: {
+    cols: 5,
+    where: "status='OPEN'", from: 'recon_issues', order: 'last_seen_at DESC, id DESC',
+    row: (i) => `
       <tr><td><strong>${esc(i.kind)}</strong><br><small>${esc(i.provider || '')}</small></td>
         <td><code>${esc(i.ref)}</code>${i.order_id ? `<br><small>order ${esc(i.order_id)}</small>` : ''}</td>
-        <td>${details(i.details)}</td>
+        <td>${reconDetails(i.details)}</td>
         <td><small>first ${fmtTime(i.first_seen_at)}<br>last ${fmtTime(i.last_seen_at)}</small></td>
         <td><form hx-post="/admin/reconciliation/issues/${i.id}/resolve" hx-swap="none" hx-on::after-request="location.reload()">
-          <button class="alt" type="submit" ${smallBtn}>Resolve</button></form></td></tr>`).join('');
-    const fixedRows = fixed.rows.map((i) => `
+          <button class="alt" type="submit" ${smallBtn}>Resolve</button></form></td></tr>`,
+  },
+  fixed: {
+    cols: 4,
+    where: "status='AUTO_FIXED'", from: 'recon_issues', order: 'id DESC',
+    row: (i) => `
       <tr><td><strong>${esc(i.kind)}</strong></td><td><code>${esc(i.ref)}</code></td>
-        <td>${details(i.details)}</td><td><small>${fmtTime(i.first_seen_at)} (run #${i.first_run_id})</small></td></tr>`).join('');
-    const inboxCounts = inbox.rows.map((r) => `<strong>${esc(r.status)}</strong>: ${r.n}`).join(' &middot; ');
-    const inboxRows = stuckInbox.rows.map((w) => `
+        <td>${reconDetails(i.details)}</td><td><small>${fmtTime(i.first_seen_at)} (run #${i.first_run_id})</small></td></tr>`,
+  },
+  inbox: {
+    cols: 7,
+    where: "status IN ('FAILED','DEAD','PROCESSING')", from: 'webhook_inbox', order: 'received_at DESC, id DESC',
+    row: (w) => `
       <tr><td>#${w.id}</td><td>${esc(w.provider)}<br><code>${esc(w.provider_event_id)}</code></td>
         <td>${esc(w.status)}</td><td>${w.attempts}</td><td><small>${fmtTime(w.next_retry_at)}</small></td>
         <td><small>${esc(w.failure_reason || '')}</small></td>
         <td>${['DEAD', 'FAILED'].includes(w.status) ? `<form hx-post="/admin/webhooks/${w.id}/retry" hx-swap="none" hx-on::after-request="location.reload()">
-          <button class="alt" type="submit" ${smallBtn}>Retry now</button></form>` : ''}</td></tr>`).join('');
+          <button class="alt" type="submit" ${smallBtn}>Retry now</button></form>` : ''}</td></tr>`,
+  },
+  runs: {
+    cols: 5,
+    where: 'TRUE', from: 'recon_runs', order: 'id DESC',
+    row: (r) => `
+      <tr><td>#${r.id}</td><td>${esc(r.trigger)}</td><td>${fmtTime(r.started_at)}</td>
+        <td>${r.finished_at ? fmtTime(r.finished_at) : '<span style="color:#d29922">running…</span>'}</td>
+        <td>${r.error ? `<span class="err">${esc(r.error)}</span>` : reconDetails(r.summary)}</td></tr>`,
+  },
+};
 
-    const table = (head, rows, empty) => rows
-      ? `<table style="width:100%;font-size:0.85rem"><thead><tr>${head.map((h) => `<th style="text-align:left">${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`
+// One page of a reconciliation table (rows + "Show more" row) and the table's total.
+async function reconRows(name, offset = 0) {
+  const t = RECON_TABLES[name];
+  const [{ rows }, { rows: [{ n }] }] = await Promise.all([
+    pool.query(`SELECT * FROM ${t.from} WHERE ${t.where} ORDER BY ${t.order} LIMIT $1 OFFSET $2`, [PAGE_SIZE, offset]),
+    pool.query(`SELECT count(*)::int AS n FROM ${t.from} WHERE ${t.where}`),
+  ]);
+  const shown = offset + rows.length;
+  const html = rows.map(t.row).join('') +
+    moreRow({ colspan: t.cols, nextUrl: `/admin/reconciliation/rows/${name}?${qs({ offset: shown })}`, shown, total: n });
+  return { html, total: n };
+}
+
+router.get('/admin/reconciliation', requireAdmin, async (req, res) => {
+  try {
+    const [open, fixed, inbox, runs, inboxCountsQ] = await Promise.all([
+      reconRows('open'), reconRows('fixed'), reconRows('inbox'), reconRows('runs'),
+      pool.query('SELECT status, COUNT(*)::int AS n FROM webhook_inbox GROUP BY status ORDER BY status'),
+    ]);
+    const inboxCounts = inboxCountsQ.rows.map((r) => `<span style="font-weight:600">${esc(r.status)}</span>: ${r.n}`).join(' &middot; ');
+
+    const table = (head, { html, total }, empty) => total
+      ? `<div class="table-wrap"><table style="width:100%;font-size:0.85rem"><thead><tr>${head.map((h) => `<th style="text-align:left">${h}</th>`).join('')}</tr></thead><tbody>${html}</tbody></table></div>`
       : `<p style="color:#5B5F6E">${empty}</p>`;
 
     const body = `
       <h2>Reconciliation</h2>
       <div class="card" style="margin-bottom:1.5rem">
         <p style="color:#5B5F6E;margin-bottom:0.75rem">Compares payment-provider records with the ledger and orders.
-          Safe differences are repaired automatically by replaying the missing provider event; the rest are listed below.</p>
+          Safe differences are repaired automatically by replaying the missing provider event; the rest are listed below.
+          An issue you resolve stays resolved unless its details change.</p>
         <form hx-post="/admin/reconciliation/run" hx-swap="none" hx-on::after-request="location.reload()" hx-disabled-elt="find button">
           <button type="submit">Run reconciliation now</button>
         </form>
       </div>
-      <div class="card" style="margin-bottom:1.5rem"><h3>Open issues (${open.rows.length})</h3>
-        ${table(['Kind', 'Reference', 'Details', 'Seen', ''], openRows, 'No open issues.')}</div>
-      <div class="card" style="margin-bottom:1.5rem"><h3>Recent automatic fixes</h3>
-        ${table(['Kind', 'Reference', 'Details', 'When'], fixedRows, 'Nothing has been repaired yet.')}</div>
+      <div class="card" style="margin-bottom:1.5rem"><h3>Open issues (${open.total})</h3>
+        ${table(['Kind', 'Reference', 'Details', 'Seen', ''], open, 'No open issues.')}</div>
+      <div class="card" style="margin-bottom:1.5rem"><h3>Automatic fixes (${fixed.total})</h3>
+        ${table(['Kind', 'Reference', 'Details', 'When'], fixed, 'Nothing has been repaired yet.')}</div>
       <div class="card" style="margin-bottom:1.5rem"><h3>Webhook inbox</h3>
         <p style="margin-bottom:0.75rem">${inboxCounts || 'empty'}</p>
-        ${table(['Row', 'Event', 'Status', 'Attempts', 'Next retry', 'Last error', ''], inboxRows, 'No failed or in-flight webhooks.')}</div>
-      <div class="card"><h3>Recent runs</h3>
-        ${table(['Run', 'Trigger', 'Started', 'Finished', 'Summary'], runRows, 'No runs yet.')}</div>`;
+        ${table(['Row', 'Event', 'Status', 'Attempts', 'Next retry', 'Last error', ''], inbox, 'No failed or in-flight webhooks.')}</div>
+      <div class="card"><h3>Runs (${runs.total})</h3>
+        ${table(['Run', 'Trigger', 'Started', 'Finished', 'Summary'], runs, 'No runs yet.')}</div>`;
     res.send(layout('Reconciliation', body, req.user));
   } catch (err) {
     console.error('Error rendering reconciliation page:', err);
     res.status(500).send('Internal Server Error');
   }
+});
+
+// GET /admin/reconciliation/rows/:table?offset= - htmx: next page of one reconciliation table
+router.get('/admin/reconciliation/rows/:table', requireAdmin, async (req, res) => {
+  if (!RECON_TABLES[req.params.table]) return res.status(404).end();
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  res.send((await reconRows(req.params.table, offset)).html);
 });
 
 router.post('/admin/reconciliation/run', requireAdmin, async (req, res) => {
@@ -638,6 +709,124 @@ router.post('/admin/webhooks/:id/retry', requireAdmin, async (req, res) => {
   const { requeueWebhook } = require('../payment/retryWorker');
   const ok = await requeueWebhook(req.params.id);
   res.status(ok ? 200 : 409).end();
+});
+
+// ---- assistant log (admin monitoring) -------------------------------------------------------
+// Every assistant chat turn, answered or failed, from assistant_log (append-only; Clear chat
+// does not remove it). Searchable by email, user id or text; filter by errors / flagged turns.
+const LOG_FILTERS = { all: 'All turns', errors: 'Errors only', flagged: 'Flagged (cleaned, corrected, limits, fallbacks)' };
+function logWhere({ q = '', status = 'all', user = '' }) {
+  const params = [];
+  const conds = [];
+  const needle = String(q).trim().slice(0, 100);
+  if (needle) {
+    params.push(`%${needle.replace(/[\\%_]/g, '\\$&')}%`);
+    conds.push(`(l.user_email ILIKE $${params.length} OR l.user_id::text ILIKE $${params.length} OR l.user_message ILIKE $${params.length} OR l.reply ILIKE $${params.length} OR l.error_code ILIKE $${params.length})`);
+  }
+  if (/^[0-9a-f-]{36}$/i.test(String(user))) { params.push(user); conds.push(`l.user_id = $${params.length}`); }
+  if (status === 'errors') conds.push(`l.status = 'ERROR'`);
+  if (status === 'flagged') conds.push(`(l.status = 'ERROR' OR cardinality(l.flags) > 0)`);
+  return { where: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params, needle };
+}
+const clip = (v, n) => { const t = String(v ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
+const logTime = (d) => new Date(d).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
+async function assistantLogRows({ q = '', status = 'all', user = '', offset = 0 } = {}) {
+  const { where, params, needle } = logWhere({ q, status, user });
+  const { rows } = await pool.query(
+    `SELECT l.*, count(*) OVER () AS total FROM assistant_log l ${where}
+      ORDER BY l.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, PAGE_SIZE, offset]
+  );
+  const total = rows.length ? Number(rows[0].total)
+    : Number((await pool.query(`SELECT count(*) FROM assistant_log l ${where}`, params)).rows[0].count);
+  const html = rows.map((r) => {
+    const badge = r.status === 'OK'
+      ? '<span style="color:#1b5e20;background:#e8f5e9;border:1px solid #a5d6a7;padding:0.1rem 0.45rem;border-radius:10px;font-size:0.75rem;font-weight:600">OK</span>'
+      : `<span style="color:#b71c1c;background:#ffebee;border:1px solid #ef9a9a;padding:0.1rem 0.45rem;border-radius:10px;font-size:0.75rem;font-weight:600">${esc(r.error_code || 'ERROR')}</span>`;
+    const flags = (r.flags || []).map((f) => `<span style="display:inline-block;background:#fff8e1;border:1px solid #ffe082;color:#795548;padding:0 0.4rem;border-radius:10px;font-size:0.7rem;margin:0.1rem 0.2rem 0 0">${esc(f)}</span>`).join('');
+    const tools = (r.tools || []).map((t) => `${t.ok ? '✓' : '✗'} ${t.tool}${t.error ? ` → ${t.error}` : ''}${t.status ? ` (${t.status})` : ''}`).join(', ');
+    const detail = [
+      ['Full message', r.user_message],
+      ['Full reply', r.reply ?? '—'],
+      ...(r.raw_reply ? [['Model text (replaced)', r.raw_reply]] : []),
+      ...(r.error_message ? [['Error', r.error_message]] : []),
+      ['Tools', JSON.stringify(r.tools, null, 2)],
+      ['Model', `${r.provider || '—'} · ${r.model_calls} call(s) · ${r.prompt_tokens} in / ${r.completion_tokens} out tokens · ${r.duration_ms} ms`],
+      ['IP', r.ip || '—'],
+    ].map(([k, v]) => `<div style="margin-top:0.4rem"><strong style="font-size:0.75rem;color:#5B5F6E">${esc(k)}</strong><pre style="white-space:pre-wrap;overflow-wrap:anywhere;margin:0.15rem 0 0;font-size:0.78rem;background:#f6f7f9;padding:0.4rem;border-radius:4px">${esc(v)}</pre></div>`).join('');
+    return `<tr>
+      <td style="width:11rem;min-width:9rem;overflow-wrap:anywhere;vertical-align:top">
+        <small style="color:#5B5F6E">${esc(logTime(r.created_at))}</small><br>
+        <a href="/admin/assistant?user=${esc(r.user_id)}" title="Only this user" style="font-size:0.85rem">${esc(r.user_email || r.user_id)}</a>
+        <div style="margin-top:0.3rem">${badge}</div>${flags ? `<div>${flags}</div>` : ''}
+        <small style="color:#5B5F6E">${r.duration_ms} ms · ${(r.prompt_tokens + r.completion_tokens).toLocaleString('en-US')} tokens</small></td>
+      <td style="min-width:9rem;overflow-wrap:anywhere;vertical-align:top">${esc(clip(r.user_message, 160))}</td>
+      <td style="min-width:12rem;overflow-wrap:anywhere;vertical-align:top">${esc(clip(r.reply ?? r.error_message ?? '', 200))}
+        ${tools ? `<div><small style="color:#5B5F6E">${esc(tools)}</small></div>` : ''}
+        <details style="margin-top:0.3rem"><summary style="cursor:pointer;font-size:0.8rem;color:#3949ab">Details</summary>${detail}</details></td>
+    </tr>`;
+  }).join('');
+  const shown = offset + rows.length;
+  return html + moreRow({ colspan: 3, nextUrl: `/admin/assistant/rows?${qs({ q: needle, status, user, offset: shown })}`, shown, total, q: needle || (status !== 'all' ? status : '') || user });
+}
+
+// GET /admin/assistant?q=&status=&user= - assistant chat log (admin only)
+router.get('/admin/assistant', requireAdmin, async (req, res, next) => {
+  try {
+    const status = LOG_FILTERS[req.query.status] ? req.query.status : 'all';
+    const q = String(req.query.q || '').slice(0, 100);
+    const user = /^[0-9a-f-]{36}$/i.test(String(req.query.user || '')) ? String(req.query.user) : '';
+    const s = (await pool.query(
+      `SELECT count(*) AS turns, count(DISTINCT user_id) AS users,
+              count(*) FILTER (WHERE status = 'ERROR') AS errors,
+              count(*) FILTER (WHERE error_code = 'MODEL_BUSY') AS busy,
+              count(*) FILTER (WHERE error_code = 'RATE_LIMITED') AS daily_limit,
+              count(*) FILTER (WHERE 'CLEANED' = ANY(flags) OR 'CORRECTED' = ANY(flags) OR 'FALSE_CLAIM' = ANY(flags)) AS fixed,
+              coalesce(sum(prompt_tokens + completion_tokens), 0) AS tokens,
+              coalesce(round(avg(duration_ms) FILTER (WHERE status = 'OK')), 0) AS avg_ms
+         FROM assistant_log WHERE created_at > now() - interval '24 hours'`)).rows[0];
+    const who = user ? (await pool.query('SELECT email FROM users WHERE id = $1', [user])).rows[0] : null;
+    const stat = (label, value, color = '#1A1D29') => `<div class="card" style="margin:0;padding:0.75rem 1rem"><small style="color:#5B5F6E">${esc(label)}</small><div style="font-size:1.35rem;font-weight:700;color:${color}">${esc(value)}</div></div>`;
+    const body = `
+      <div style="display:flex;flex-wrap:wrap;gap:0.5rem;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <h2>Assistant Log</h2>
+        <a href="/admin"><button class="alt">← Back to Admin Overview</button></a>
+      </div>
+      <p style="color:#5B5F6E;margin-top:0">Every LEARNX Assistant turn, answered or failed. Kept when a user clears their chat; deleted only after ${esc(process.env.ASSISTANT_LOG_DAYS || 90)} days (<code>ASSISTANT_LOG_DAYS</code>). Purchase steps are also in <code>intent_events</code>.</p>
+      <h3 style="margin-bottom:0.5rem">Last 24 hours</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:0.75rem;margin-bottom:1.5rem">
+        ${stat('Turns', s.turns)}${stat('Users', s.users)}${stat('Errors', s.errors, Number(s.errors) ? '#b71c1c' : '#1A1D29')}
+        ${stat('Model limit hit', s.busy)}${stat('Daily limit hit', s.daily_limit)}${stat('Replies fixed by app', s.fixed)}
+        ${stat('Tokens', Number(s.tokens).toLocaleString('en-US'))}${stat('Avg reply time', `${s.avg_ms} ms`)}
+      </div>
+      ${user ? `<p>Showing only <strong>${esc(who?.email || user)}</strong> · <a href="/admin/assistant">show all users</a></p>` : ''}
+      <form class="table-tools" hx-get="/admin/assistant/rows" hx-target="#log-rows" hx-swap="innerHTML"
+        hx-trigger="input changed delay:300ms from:input[name=q], search from:input[name=q], change from:select" onsubmit="return false">
+        <input type="search" name="q" value="${esc(q)}" placeholder="Search email, user id, message, reply or error code…" autocomplete="off">
+        <select name="status" style="width:auto;margin:0">${Object.entries(LOG_FILTERS).map(([k, v]) => `<option value="${k}"${k === status ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>
+        <input type="hidden" name="user" value="${esc(user)}">
+      </form>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Turn</th><th>Message</th><th>Reply</th></tr></thead>
+        <tbody id="log-rows">${await assistantLogRows({ q, status, user })}</tbody>
+      </table></div>`;
+    res.send(layout('Admin - Assistant Log', body, req.user));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /admin/assistant/rows?q=&status=&user=&offset= - htmx: next page / filtered rows
+router.get('/admin/assistant/rows', requireAdmin, async (req, res) => {
+  try {
+    const status = LOG_FILTERS[req.query.status] ? req.query.status : 'all';
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    res.send(await assistantLogRows({ q: req.query.q || '', status, user: req.query.user || '', offset }));
+  } catch (err) {
+    console.error('Error loading assistant log rows:', err);
+    res.status(500).send('<tr><td colspan="3" class="err">Could not load the log.</td></tr>');
+  }
 });
 
 module.exports = router;

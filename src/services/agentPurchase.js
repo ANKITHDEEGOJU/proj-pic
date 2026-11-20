@@ -35,7 +35,10 @@ class AgentPurchaseError extends Error {
 
 const AUDIENCE = 'learnx-agent-purchase';
 const MERCHANT = () => process.env.MERCHANT_ID || 'LEARNX';
-const num = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && process.env[name] !== '' && process.env[name] != null ? v : dflt; };
+const num = (name, dflt) => {
+  const v = process.env[name];
+  return v === undefined || v === '' || !Number.isFinite(Number(v)) ? dflt : Number(v);
+};
 const TTL = () => num('AGENT_APPROVAL_TTL_SECONDS', 300);
 const PROPOSAL_TTL_HOURS = () => num('AGENT_PROPOSAL_TTL_HOURS', 24);
 const UNPAID_MINUTES = () => num('AGENT_UNPAID_MINUTES', 30);
@@ -44,6 +47,14 @@ const PROPOSALS_PER_DAY = () => num('AGENT_PROPOSALS_PER_DAY', 20);
 const SECRET = () =>
   process.env.AGENT_APPROVAL_SECRET ||
   crypto.createHash('sha256').update(`agent-approval:${process.env.JWT_SECRET}`).digest('hex');
+
+// Provider when the caller doesn't name one (one-click button, assistant):
+// AGENT_DEFAULT_PROVIDER, else Razorpay when it has test keys, else mock.
+const defaultProvider = () => {
+  const p = process.env.AGENT_DEFAULT_PROVIDER;
+  if (p === 'mock' || p === 'razorpay') return p;
+  return /^rzp_test_/.test(process.env.RAZORPAY_KEY_ID || '') ? 'razorpay' : 'mock';
+};
 
 const findCourse = (catalog, key) =>
   catalog.list().find((p) => (p.id === key || p.slug === key) && (p.type || 'COURSE') === 'COURSE') || null;
@@ -84,7 +95,7 @@ async function listIntents(userId, { agentKeyId = null } = {}) {
 // What happened to the money after the approval was used, read from the normal order.
 const ORDER_TO_PAYMENT = {
   PENDING: 'PENDING', COMPLETED: 'PAID', REFUND_PENDING: 'REFUND_PENDING', REFUNDED: 'REFUNDED',
-  REFUND_FAILED: 'REFUND_FAILED', CHARGED_BACK: 'CHARGED_BACK', FAILED: 'FAILED',
+  REFUND_FAILED: 'REFUND_FAILED', CHARGED_BACK: 'CHARGED_BACK', FAILED: 'FAILED', EXPIRED: 'UNPAID', CANCELLED: 'CANCELLED',
 };
 function paymentState(i) {
   if (!i.order_id) return null;
@@ -121,7 +132,19 @@ async function sweep({ userId = null } = {}) {
     args(UNPAID_MINUTES())
   )).rows;
   for (const r of unpaid) await logEvent(r.id, 'FAILED', { userId: r.user_id, code: 'UNPAID', detail: `Payment not completed within ${UNPAID_MINUTES()} min` });
-  return { expired: expired.length, unpaid: unpaid.length };
+
+  // The money arrived after all (paid after the checkout was closed or the request timed out):
+  // the request is a completed purchase again.
+  const late = (await pool.query(
+    `UPDATE purchase_intents pi SET status='EXECUTED', failure_reason=NULL
+       FROM orders o
+      WHERE o.id = pi.order_id AND pi.status='FAILED' AND o.status IN ('COMPLETED','REFUND_PENDING','REFUNDED','REFUND_FAILED')
+        ${userId ? 'AND pi.user_id = $1' : ''}
+      RETURNING pi.id, pi.user_id`,
+    userId ? [userId] : []
+  )).rows;
+  for (const r of late) await logEvent(r.id, 'PAID_LATE', { userId: r.user_id, detail: 'Payment arrived after the request was failed; purchase completed' });
+  return { expired: expired.length, unpaid: unpaid.length, late: late.length };
 }
 
 // ---- propose / approve / cancel ------------------------------------------------------------
@@ -140,6 +163,16 @@ async function propose({ userId, productId, provider = 'mock', agentName = 'simu
     throw await reject('ALREADY_OWNED', 'You already have access to this course.');
 
   await sweep({ userId }); // a lapsed request for the same course must not block this one
+
+  // A request for this course that was executed but is still waiting for its payment (e.g. the
+  // Razorpay checkout is open) blocks a new one: paying both would charge twice. It stops
+  // blocking once it is paid (then ALREADY_OWNED) or the sweeper fails it (AGENT_UNPAID_MINUTES).
+  const waiting = (await pool.query(
+    `SELECT pi.id FROM purchase_intents pi JOIN orders o ON o.id = pi.order_id
+      WHERE pi.user_id=$1 AND pi.item_id=$2 AND pi.status='EXECUTED' AND o.status='PENDING' LIMIT 1`,
+    [userId, itemId]
+  )).rows[0];
+  if (waiting) throw await reject('PAYMENT_PENDING', 'A purchase of this course is already waiting for payment. Pay it on its card, or wait for it to expire.');
 
   // Daily proposal limit per agent key (or per user for the simulated agent), via M5 quotas.
   const requestKey = `agent-propose:${crypto.randomUUID()}`;
@@ -226,6 +259,40 @@ async function stateError(intentId, userId, action) {
   const i = await getIntent(intentId);
   if (!i || i.user_id !== userId) return new AgentPurchaseError('NOT_FOUND', 'Purchase request not found.');
   return new AgentPurchaseError(`ALREADY_${i.status}`, `This request is ${i.status.toLowerCase()}; it can't be ${action === 'approve' ? 'approved' : 'cancelled'} now.`);
+}
+
+// The user closed the provider's checkout without paying (an executed request whose order is
+// still PENDING): the order becomes CANCELLED and the request FAILED, so its card stops offering
+// Pay and a new request for the course is allowed. If the provider does take the money later,
+// the normal webhook still completes the order (CANCELLED -> COMPLETED) and the card shows PAID.
+async function cancelUnpaid({ orderId, userId, ctx = {} }) {
+  ctx = { actor: 'user', ...ctx };
+  const i = (await pool.query(
+    `SELECT pi.id FROM purchase_intents pi JOIN orders o ON o.id = pi.order_id
+      WHERE pi.order_id::text=$1 AND pi.user_id=$2 AND pi.status='EXECUTED' AND o.status='PENDING'`,
+    [String(orderId), userId]
+  )).rows[0];
+  if (!i) return null;
+  await pool.query("UPDATE orders SET status='CANCELLED', updated_at=now() WHERE id=$1 AND status='PENDING'", [orderId]);
+  await pool.query("UPDATE purchase_intents SET status='FAILED', failure_reason='Payment cancelled at checkout' WHERE id=$1 AND status='EXECUTED'", [i.id]);
+  await logEvent(i.id, 'FAILED', { userId, code: 'CHECKOUT_CLOSED', detail: 'Checkout closed without paying', ctx });
+  return i.id;
+}
+
+// The user picks how to pay on a request that is still waiting for approval (the price, item
+// and the approval rules don't depend on the provider). Only the owner, only while PROPOSED.
+async function setProvider({ intentId, userId, provider, ctx = {} }) {
+  ctx = { actor: 'user', ...ctx };
+  if (!['mock', 'razorpay'].includes(provider)) throw new AgentPurchaseError('BAD_PROVIDER', 'Unknown payment provider.');
+  const before = await getIntent(intentId);
+  const { rows } = await pool.query(
+    `UPDATE purchase_intents SET provider=$3 WHERE id=$1 AND user_id=$2 AND status='PROPOSED' RETURNING *`,
+    [intentId, userId, provider]
+  );
+  if (!rows[0]) throw await stateError(intentId, userId, 'approve');
+  if (before && before.provider !== provider)
+    await logEvent(intentId, 'PROVIDER_CHANGED', { userId, detail: `${before.provider} -> ${provider}`, ctx });
+  return rows[0];
 }
 
 // Records a step-up (password) failure on approve.
@@ -318,6 +385,7 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
 
   try {
     const pay = await startPayment({ intent: i, orderId, course });
+    if (pay?.redirectUrl) await pool.query('UPDATE purchase_intents SET pay_url=$2 WHERE id=$1', [intentId, pay.redirectUrl]);
     return { intent: { ...i, status: 'EXECUTED', order_id: orderId }, orderId, ...pay };
   } catch (e) {
     // The approval is spent either way; record why the payment did not start.
@@ -329,6 +397,6 @@ async function executeChecked({ intentId, token, userId, agentKeyId, catalog, de
 }
 
 module.exports = {
-  AgentPurchaseError, propose, approve, approveDenied, pickupToken, cancel, execute, sweep,
-  getIntent, listIntents, listEvents, paymentState, findCourse, AUDIENCE,
+  AgentPurchaseError, propose, approve, approveDenied, setProvider, cancelUnpaid, pickupToken, cancel, execute, sweep,
+  getIntent, listIntents, listEvents, paymentState, findCourse, defaultProvider, AUDIENCE,
 };

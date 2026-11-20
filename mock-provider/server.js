@@ -14,6 +14,8 @@ app.use(express.json());
 const STREAMFLIX_URL = process.env.STREAMFLIX_URL 
 const MOCK_SECRET = process.env.MOCK_WEBHOOK_SECRET 
 const PORT = process.env.MOCK_PROVIDER_PORT 
+// Where the checkout page may send the user back to inside StreamFlix (fixed list: no open redirect).
+const BACK_TARGETS = ["agent", "org"];
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -265,6 +267,7 @@ app.get("/pay/:providerPaymentId", (req, res) => {
         <input type="hidden" name="amount" value="${esc(amount)}">
         <input type="hidden" name="currency" value="${esc(currency)}">
         <input type="hidden" name="orderRef" value="${esc(ref || "")}">
+        <input type="hidden" name="back" value="${BACK_TARGETS.includes(req.query.back) ? req.query.back : ""}">
         <button class="pay" name="action" value="pay">✅ Pay ${esc(amount)} ${esc(currency)}</button>
         <button class="fail" name="action" value="fail">❌ Simulate Failure</button>
         <button class="cancel" name="action" value="cancel">Cancel</button>
@@ -278,7 +281,16 @@ app.get("/pay/:providerPaymentId", (req, res) => {
 app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
   const { providerPaymentId } = req.params;
   const { action, userId, productId, amount, currency, orderRef } = req.body;
-  if (action === "cancel") return res.redirect(`${STREAMFLIX_URL}/courses`);
+  // back=agent: the payment was started from the LEARNX Assistant chat; return there
+  // (cancel = checkout closed without paying, as with Razorpay). Only this fixed value is
+  // accepted, so the page can't be used to redirect anywhere else.
+  // back=org: a seat-pack purchase; return to the organization page.
+  const toAgent = req.body.back === "agent";
+  const toOrg = req.body.back === "org";
+  if (action === "cancel")
+    return res.redirect(toAgent
+      ? `${STREAMFLIX_URL}/assistant/checkout-closed?ref=${encodeURIComponent(orderRef || "")}`
+      : `${STREAMFLIX_URL}/checkout/cancelled?ref=${encodeURIComponent(orderRef || "")}${toOrg ? "&back=org" : ""}`);
   const eventType = action === "pay" ? "payment.succeeded" : "payment.failed";
   recordPayment(providerPaymentId, {
     status: action === "pay" ? "paid" : "failed",
@@ -309,7 +321,7 @@ app.post("/pay/:providerPaymentId/confirm", async (req, res) => {
   //   ),
   // );
 
-  res.redirect(`${STREAMFLIX_URL}/courses`);
+  res.redirect(`${STREAMFLIX_URL}${toAgent ? "/agent" : toOrg ? `/org?checkout=${action === "pay" ? "paid" : "failed"}` : "/courses"}`);
 });
 
 

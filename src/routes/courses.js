@@ -3,9 +3,10 @@
 const router = require('express').Router();
 const pool = require('../db');
 const { requireAuth } = require('../auth');
-const { layout, courseCard, subscriptionCard, accessFragment, activityPage } = require('../views');
+const { layout, courseCard, subscriptionCard, accessFragment, activityPage, ledgerRows } = require('../views');
 const { resolveSubscriptionPrice } = require('../services/pricingEngine');
 const { isRefundPending } = require('../services/refundStatus');
+const { passState, cardOpts } = require('../services/subscriptions');
 
 // Helper to look up catalog item by id or slug safely
 function resolveCatalogProduct(catalog, key) {
@@ -45,8 +46,11 @@ router.get('/courses/subscription-banner', requireAuth, async (req, res) => {
       (!subEnt.expiresAt || new Date(subEnt.expiresAt).getTime() > Date.now());
 
     const { ledger } = req.app.locals.engine;
-    const refundPending = isSubActive && (await isRefundPending(ledger, subEnt.refundableEventId));
-    res.send(subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, { refundPending }));
+    const passOpts = isSubActive ? cardOpts(await passState({ ledger, projection, userId: req.user.id })) : {};
+    // The card was waiting for a refund and it has finished: reload the page, so the course
+    // cards (access through the pass) update too, not only this card.
+    if (req.query.pending === '1' && !passOpts.refundPending) return res.set('HX-Refresh', 'true').end();
+    res.send(subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, passOpts));
   } catch (err) {
     console.error('Error fetching subscription banner:', err);
     res.status(500).end();
@@ -77,8 +81,8 @@ router.get('/courses', requireAuth, async (req, res) => {
       (!subEnt.expiresAt || new Date(subEnt.expiresAt).getTime() > Date.now());
 
     const { ledger } = req.app.locals.engine;
-    const subRefundPending = isSubActive && (await isRefundPending(ledger, subEnt.refundableEventId));
-    const subBanner = subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, { refundPending: subRefundPending });
+    const passOpts = isSubActive ? cardOpts(await passState({ ledger, projection, userId: req.user.id })) : {};
+    const subBanner = subscriptionCard(subInCart, subPriceInfo, isSubActive, subEnt, passOpts);
 
     const courseProducts =
       typeof catalog.listCourses === 'function'
@@ -143,6 +147,17 @@ router.get('/activity', requireAuth, async (req, res, next) => {
     const records = (await ledger.getAll()).filter((r) => r.event.userId === req.user.id);
     const ents = Object.values(projection.snapshot()).filter((e) => e.userId === req.user.id);
     res.send(layout('Activity', activityPage(records, ents), req.user));
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /activity/ledger?q=&offset= - htmx: next page / search results of the ledger table
+router.get('/activity/ledger', requireAuth, async (req, res, next) => {
+  try {
+    const records = (await req.app.locals.engine.ledger.getAll()).filter((r) => r.event.userId === req.user.id);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    res.send(ledgerRows(records, { q: String(req.query.q || '').slice(0, 100), offset }));
   } catch (e) {
     next(e);
   }

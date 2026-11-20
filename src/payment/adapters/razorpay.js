@@ -33,9 +33,19 @@ class RazorpayPaymentAdapter extends PaymentProviderAdapter {
     // URL on another host (e.g. the ngrok tunnel) loses the auth cookie and lands on /login.
     const redirectUrl = `/razorpay/checkout?orderId=${encodeURIComponent(order.id)}&userId=${encodeURIComponent(
       userId
-    )}&productId=${encodeURIComponent(productId)}&amount=${amount}&currency=${currency}`;
+    )}&productId=${encodeURIComponent(productId)}&amount=${amount}&currency=${currency}&ref=${encodeURIComponent(orderRef)}`;
 
     return { providerPaymentId: order.id, redirectUrl };
+  }
+
+  // The checkout link of an existing, still unpaid Razorpay order for one of our orders
+  // (receipt = our order id), or null. Used when the link handed out at checkout was lost.
+  async findCheckoutUrl({ orderRef, userId, productId }) {
+    const list = await this.#client.orders.all({ receipt: String(orderRef), count: 10 });
+    const order = (list.items || []).find((o) => o.receipt === String(orderRef) && o.status !== "paid");
+    if (!order) return null;
+    return `/razorpay/checkout?orderId=${encodeURIComponent(order.id)}&userId=${encodeURIComponent(userId)}&productId=${encodeURIComponent(
+      productId || "")}&amount=${order.amount / 100}&currency=${order.currency}&ref=${encodeURIComponent(orderRef)}`;
   }
 
   // Extract unique provider event ID for inbox idempotency

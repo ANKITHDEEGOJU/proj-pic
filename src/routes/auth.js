@@ -6,6 +6,9 @@ const { layout, authForm, errorFragment } = require('../views');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Home: logged-in users go to the course list, everyone else to the login page.
+router.get('/', (req, res) => res.redirect(req.user ? '/courses' : '/login'));
+
 router.get('/login',    (req, res) => req.user ? res.redirect('/courses') : res.send(layout('Login', authForm('login'), null)));
 router.get('/register', (req, res) => req.user ? res.redirect('/courses') : res.send(layout('Register', authForm('register'), null)));
 

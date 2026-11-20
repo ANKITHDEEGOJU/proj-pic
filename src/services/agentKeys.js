@@ -1,11 +1,13 @@
 'use strict';
-// M7: agent keys - an agent's own credential, separate from the user's login.
+// M7: agent identities (table agent_keys).
 //
-// The user creates a key in the browser (/agent) and gives it to their agent. The agent sends
-// it as "Authorization: Bearer lx_agent_..." to /agent/api/* only. The key is shown once;
-// only its SHA-256 hash is stored (the key is 32 random bytes, so a plain hash is enough).
-// Scopes: propose, read, execute. There is deliberately no "approve" scope: approving needs
-// the user's browser session (and a password step-up above AGENT_STEPUP_ABOVE_CENTS).
+// Every purchase request records which agent made it (purchase_intents.agent_key_id), and the
+// approval token is bound to that agent: only the agent that proposed a request can collect its
+// approval (agentPurchase.pickupToken) and complete it (WRONG_AGENT otherwise).
+// LEARNX Assistant gets one such identity per user ("learnx-assistant", created on first use).
+// A random key is generated and only its SHA-256 hash is stored; nothing logs in with it, since
+// the assistant runs inside the server. There is deliberately no "approve" scope: approving
+// needs the user's browser session (and a password step-up above AGENT_STEPUP_ABOVE_CENTS).
 
 const crypto = require('node:crypto');
 const pool = require('../db');
@@ -27,31 +29,4 @@ async function createKey({ userId, name, scopes = SCOPES }) {
   return { key, row: rows[0] };
 }
 
-async function listKeys(userId) {
-  return (await pool.query(
-    `SELECT id, name, key_prefix, scopes, created_at, last_used_at, revoked_at
-       FROM agent_keys WHERE user_id=$1 ORDER BY created_at DESC`,
-    [userId]
-  )).rows;
-}
-
-async function revokeKey({ id, userId }) {
-  const { rowCount } = await pool.query(
-    'UPDATE agent_keys SET revoked_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL',
-    [id, userId]
-  );
-  return rowCount === 1;
-}
-
-// Returns the active key row for a raw key, or null.
-async function authenticate(rawKey) {
-  if (!String(rawKey || '').startsWith(PREFIX)) return null;
-  const { rows } = await pool.query(
-    `UPDATE agent_keys SET last_used_at=now() WHERE key_hash=$1 AND revoked_at IS NULL
-     RETURNING id, user_id, name, scopes`,
-    [hash(rawKey)]
-  );
-  return rows[0] || null;
-}
-
-module.exports = { createKey, listKeys, revokeKey, authenticate, SCOPES, PREFIX };
+module.exports = { createKey, SCOPES, PREFIX };

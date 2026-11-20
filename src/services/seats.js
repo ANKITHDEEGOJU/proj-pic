@@ -74,7 +74,7 @@ async function getPool(poolId) {
 
 // Creates the org (if the buyer has none yet), an order with one SEAT_PACK line and a
 // PENDING_PAYMENT pool, all in one transaction. The caller then starts the provider payment.
-async function createSeatPackOrder({ userId, orgName, course, seats, provider }) {
+async function createSeatPackOrder({ userId, orgName, course, seats, provider, checkoutKey = null }) {
   seats = Number(seats);
   if (!Number.isInteger(seats) || seats < 1 || seats > MAX_SEATS_PER_PACK)
     throw new SeatError('BAD_SEATS', `Choose between 1 and ${MAX_SEATS_PER_PACK} seats.`);
@@ -86,6 +86,12 @@ async function createSeatPackOrder({ userId, orgName, course, seats, provider })
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // One order per checkout click: the same form submitted twice returns the first order.
+    const sameClick = await require('./checkoutOnce').claim(client, userId, checkoutKey);
+    if (sameClick) {
+      await client.query('ROLLBACK');
+      return { repeated: sameClick };
+    }
     let org = (await client.query('SELECT * FROM organizations WHERE owner_user_id=$1', [userId])).rows[0];
     if (!org) {
       const name = String(orgName || '').trim();
@@ -97,9 +103,9 @@ async function createSeatPackOrder({ userId, orgName, course, seats, provider })
     // Coupons never apply to seat packs (see README "Commercial rules").
     const orderId = (
       await client.query(
-        `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, provider, status)
-         VALUES ($1,$2,0,$2,$3,'PENDING') RETURNING id`,
-        [userId, totalCents, provider]
+        `INSERT INTO orders (user_id, subtotal_cents, discount_cents, final_payable_cents, provider, status, checkout_key)
+         VALUES ($1,$2,0,$2,$3,'PENDING',$4) RETURNING id`,
+        [userId, totalCents, provider, checkoutKey]
       )
     ).rows[0].id;
     await client.query(

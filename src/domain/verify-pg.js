@@ -1,6 +1,7 @@
 "use strict";
 // Run: npm run verify:pg   (needs DATABASE_URL with schema applied). Leaves test rows behind: the ledger is immutable by design.
 require("dotenv").config();
+delete process.env.SUB_DURATION_MINUTES; // demo switch off: checks expect real 30-day periods
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 const pool = require("../db");

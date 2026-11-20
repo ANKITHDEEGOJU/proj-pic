@@ -7,7 +7,7 @@ const { requireAuth } = require("../auth");
 const { PaymentService } = require("../payment/service");
 const { courseCard, subscriptionCard } = require("../views");
 const { validateCoupon, resolveSubscriptionPrice } = require("../services/pricingEngine");
-const { isRenewal } = require("../services/subscriptions");
+const { isRenewal, renewBlocked, refundPass, passState, cardOpts } = require("../services/subscriptions");
 
 // Helper to look up catalog item by id or slug safely
 function resolveCatalogProduct(catalog, key) {
@@ -41,6 +41,11 @@ router.post("/courses/:slug/checkout", requireAuth, async (req, res, next) => {
 
     if (d.allowed) {
       return res.send(courseCard(p, d, "You already own this course."));
+    }
+    // One renewal at a time (also checked on Renew and at cart checkout).
+    if (p.type === "SUBSCRIPTION") {
+      const blocked = await renewBlocked({ ledger: req.app.locals.engine.ledger, projection: req.app.locals.engine.projection, userId: req.user.id, scope: p.scope || "ALL_ACCESS" });
+      if (blocked) return res.send(`<span style="color:#d32f2f;">${blocked}</span>`);
     }
 
     await client.query("BEGIN");
@@ -180,6 +185,22 @@ router.post(
         return res.send(
           courseCard(p, decisions.evaluateAccess(req.user.id, productId), "This access was granted for free and can't be refunded.")
         );
+      }
+
+      // A pass is refunded as a whole: every paid period of the current pass (the one running now
+      // and any renewal paid in advance), one provider refund per payment. When all are confirmed,
+      // its free (admin / scholarship) periods end too. See services/subscriptions.refundPass.
+      if (ent.type === "SUBSCRIPTION") {
+        const out = await refundPass({ ledger, projection, catalog, user: req.user, scope: ent.scope || "ALL_ACCESS" });
+        if (out.ok && !out.failed.length) return res.set("HX-Refresh", "true").send();
+        const st = await passState({ ledger, projection, userId: req.user.id, scope: ent.scope || "ALL_ACCESS" });
+        const subPriceInfo = await resolveSubscriptionPrice(req.user, productId, catalog);
+        const message = !out.results
+          ? out.message
+          : out.ok
+            ? `Refund requested for ${out.results.length - out.failed.length} of ${out.results.length} payments. Failed: ${out.failed.map((f) => f.error).join('; ')}`
+            : `Refund failed: ${out.failed.map((f) => f.error).join('; ')}`;
+        return res.send(subscriptionCard(false, subPriceInfo, Boolean(st.ent), st.ent || ent, { ...cardOpts(st), message }));
       }
 
       // 2. Locate original purchase record in ledger
@@ -346,7 +367,11 @@ router.post(
   }
 );
 router.get('/razorpay/checkout', requireAuth, (req, res) => {
-  const { orderId } = req.query;
+  const { orderId, ref } = req.query;
+  // back=agent: an assistant purchase. Paid -> back to the chat. Closed without paying ->
+  // /assistant/checkout-closed cancels that payment (never puts the course in the cart).
+  const fromAgent = req.query.back === 'agent';
+  const fromOrg = req.query.back === 'org'; // seat-pack checkout: back to /org
   res.send(`<!doctype html><html><head>
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   </head><body><script>
@@ -354,8 +379,12 @@ router.get('/razorpay/checkout', requireAuth, (req, res) => {
       key: ${JSON.stringify(process.env.RAZORPAY_KEY_ID || '').replace(/</g, '\\u003c')},
       order_id: ${JSON.stringify(String(orderId || '')).replace(/</g, '\\u003c')},
       handler: function(response) {
-        window.location.href = '/courses';
-      }
+        window.location.href = ${fromAgent ? "'/agent'" : fromOrg ? "'/org?checkout=paid'" : "'/courses'"};
+      },
+      // Closed without paying: a cart order puts its items back in the cart.
+      modal: { ondismiss: function() {
+        window.location.href = (${fromAgent ? "'/assistant/checkout-closed?ref='" : "'/checkout/cancelled?ref='"}) + encodeURIComponent(${JSON.stringify(String(ref || '')).replace(/</g, '\\u003c')})${fromOrg ? " + '&back=org'" : ''};
+      } }
     };
     const rzp = new Razorpay(options);
     rzp.open();
