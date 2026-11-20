@@ -165,7 +165,7 @@ ES256) and adding intent mandates for purchases made while the user is away.
 | 19 Nov | `7dd197d` | Agent-mediated purchase (M7 v1) and audit/verification scripts |
 | 20 Nov | `4cc86c0` | Simulated agent replaced by the LEARNX Assistant (cards, outcome lines, limits, reply cleaning), assistant log, pass rules (one renewal, full refund), seat checkout return, one order / grant per click, reconciliation tweaks |
 | 20 Nov | `1c53ec8` | Course guides, payment matching (amount, currency, order owner), secrets and dev-route hardening, rate limits, generic errors, coupons on agent purchases, review fixes |
-| 20 Nov | *(uncommitted)* | Structure clean-up (shared orders / refunds, tests in `test/`), readability pass, org notices that fade, ADR-000 / ADR-008 completed, documentation |
+| 20 Nov | `f7dcab5` | Structure clean-up (shared orders / refunds, tests in `test/`), readability pass, org notices that fade, ADR-000 / ADR-008 completed, documentation |
 
 ### 4.2 Earlier sessions compared with the latest one
 

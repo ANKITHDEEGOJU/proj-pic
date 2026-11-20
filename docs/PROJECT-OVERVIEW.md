@@ -1,7 +1,6 @@
 # LEARNX (streamflix): end-to-end project overview and decision log
 
-*Written 2026-11-20. Covers the whole project from Phase 0 (1 October 2026) to the latest uncommitted
-changes, with the work of the most recent sessions described in detail. Decisions ADR-000 to ADR-014 are
+*Written 2026-11-20. Covers the whole project from Phase 0 (1 October 2026) to commit `f7dcab5` (20 November), with the work of the most recent sessions described in detail. Decisions ADR-000 to ADR-014 are
 in [Architecture_Decision_Records.md](Architecture_Decision_Records.md); this document summarises them and
 continues the log with ADR-015 to ADR-030. Test evidence is in [E2E-TESTS.md](E2E-TESTS.md).*
 
@@ -67,7 +66,7 @@ The brief's "done when" is covered end to end in the browser runs recorded in `E
 | 27 Oct – 11 Nov | `a3504b5` → `4175692` | Razorpay test mode, cart, admin panel, coupons, global subscription, multi-item orders, admin grants | A usable store |
 | 12–14 Nov (earlier chats) | `b020c80` → `7d1b6d3` | M1 refinement, webhook-driven refunds, retries (M2), reconciliation (M6), seats + renew/cancel (M4), quotas (M5), failure switches (M8) | All non-agent milestones done |
 | 15–19 Nov (earlier chats) | `7dd197d` | M7 v1: a *simulated* agent, review page, signed approval, agent keys, JSON API, step-up password; saved-card mandates tried and removed | Agent flow driven by buttons, not AI |
-| 19–20 Nov (this session) | `4cc86c0` (assistant, assistant log, pass rules, seat return, idempotency), `1c53ec8` (guides, payment matching, security, rate limits, agent coupons), + uncommitted (clean-up, org notices, docs) | Everything in the next table | Real AI agent, hardened payments, paid content, cleaner code |
+| 19–20 Nov (this session) | `4cc86c0` (assistant, assistant log, pass rules, seat return, idempotency), `1c53ec8` (guides, payment matching, security, rate limits, agent coupons), `f7dcab5` (clean-up, org notices, docs) | Everything in the next table | Real AI agent, hardened payments, paid content, cleaner code |
 
 **What changed in this session, compared with where the earlier chats left off:**
 
