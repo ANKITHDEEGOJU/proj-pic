@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" font-family="Arial, Helvetica, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#444"/></marker>
+  </defs>
+  <rect width="980" height="560" fill="#ffffff"/>
+  <text x="490" y="26" text-anchor="middle" font-size="17" font-weight="bold">LEARNX components and data flow</text>
+
+  <!-- Browser -->
+  <rect x="20" y="60" width="170" height="200" rx="8" fill="#eef2ff" stroke="#2743d8"/>
+  <text x="105" y="84" text-anchor="middle" font-weight="bold">Browser (htmx)</text>
+  <text x="105" y="110" text-anchor="middle">Courses, cart, pass</text>
+  <text x="105" y="130" text-anchor="middle">Organization / seats</text>
+  <text x="105" y="150" text-anchor="middle">Assistant chat + cards</text>
+  <text x="105" y="170" text-anchor="middle">Course guides</text>
+  <text x="105" y="190" text-anchor="middle">Admin pages</text>
+  <text x="105" y="240" text-anchor="middle" fill="#555" font-size="11">trust boundary: login cookie (JWT)</text>
+
+  <!-- App -->
+  <rect x="230" y="50" width="520" height="440" rx="10" fill="#fafafa" stroke="#333" stroke-dasharray="6 4"/>
+  <text x="490" y="72" text-anchor="middle" font-weight="bold">Express app (one instance)</text>
+
+  <rect x="250" y="90" width="230" height="70" rx="6" fill="#ffffff" stroke="#555"/>
+  <text x="365" y="112" text-anchor="middle" font-weight="bold">routes/</text>
+  <text x="365" y="132" text-anchor="middle" font-size="12">parse request, call service, render</text>
+  <text x="365" y="149" text-anchor="middle" font-size="11" fill="#555">auth, rate limits, error handler</text>
+
+  <rect x="250" y="180" width="230" height="110" rx="6" fill="#ffffff" stroke="#555"/>
+  <text x="365" y="202" text-anchor="middle" font-weight="bold">services/</text>
+  <text x="365" y="222" text-anchor="middle" font-size="12">orders, refunds, subscriptions,</text>
+  <text x="365" y="239" text-anchor="middle" font-size="12">seats, quotas, pricing, coupons,</text>
+  <text x="365" y="256" text-anchor="middle" font-size="12">agentPurchase, assistant,</text>
+  <text x="365" y="273" text-anchor="middle" font-size="12">courseDocs, checkoutOnce</text>
+
+  <rect x="250" y="310" width="230" height="90" rx="6" fill="#e8f5e9" stroke="#2e7d32"/>
+  <text x="365" y="332" text-anchor="middle" font-weight="bold">domain/ (provider-neutral)</text>
+  <text x="365" y="352" text-anchor="middle" font-size="12">ledger (append-only) → projection</text>
+  <text x="365" y="369" text-anchor="middle" font-size="12">→ decision: allowed / reason</text>
+  <text x="365" y="386" text-anchor="middle" font-size="11" fill="#555">no provider or agent code</text>
+
+  <rect x="510" y="90" width="220" height="130" rx="6" fill="#fff8e1" stroke="#b07a00"/>
+  <text x="620" y="112" text-anchor="middle" font-weight="bold">payment/</text>
+  <text x="620" y="132" text-anchor="middle" font-size="12">adapter contract</text>
+  <text x="620" y="149" text-anchor="middle" font-size="12">webhook inbox + processor</text>
+  <text x="620" y="166" text-anchor="middle" font-size="12">(order, amount, currency checks)</text>
+  <text x="620" y="183" text-anchor="middle" font-size="12">retry worker (backoff, DEAD)</text>
+  <text x="620" y="200" text-anchor="middle" font-size="12">reconciliation (replay / escalate)</text>
+
+  <rect x="510" y="240" width="220" height="70" rx="6" fill="#ffffff" stroke="#555"/>
+  <text x="620" y="262" text-anchor="middle" font-weight="bold">background jobs</text>
+  <text x="620" y="282" text-anchor="middle" font-size="12">retry 30 s · recon 15 min</text>
+  <text x="620" y="299" text-anchor="middle" font-size="12">agent sweep 1 min · log purge 1 h</text>
+
+  <rect x="510" y="330" width="220" height="140" rx="6" fill="#e3f2fd" stroke="#1565c0"/>
+  <text x="620" y="352" text-anchor="middle" font-weight="bold">PostgreSQL (21 tables)</text>
+  <text x="620" y="372" text-anchor="middle" font-size="12">commerce_ledger (append-only)</text>
+  <text x="620" y="389" text-anchor="middle" font-size="12">orders, order_line_items</text>
+  <text x="620" y="406" text-anchor="middle" font-size="12">webhook_inbox, recon_*</text>
+  <text x="620" y="423" text-anchor="middle" font-size="12">purchase_intents, intent_events</text>
+  <text x="620" y="440" text-anchor="middle" font-size="12">usage_*, org_*, course_docs,</text>
+  <text x="620" y="457" text-anchor="middle" font-size="12">assistant_log, …</text>
+
+  <!-- External -->
+  <rect x="790" y="70" width="170" height="70" rx="8" fill="#fff3e0" stroke="#b07a00"/>
+  <text x="875" y="96" text-anchor="middle" font-weight="bold">Razorpay</text>
+  <text x="875" y="116" text-anchor="middle" font-size="12">test mode (HMAC</text>
+  <text x="875" y="131" text-anchor="middle" font-size="12">webhooks via ngrok)</text>
+
+  <rect x="790" y="160" width="170" height="70" rx="8" fill="#fff3e0" stroke="#b07a00"/>
+  <text x="875" y="186" text-anchor="middle" font-weight="bold">Mock provider</text>
+  <text x="875" y="206" text-anchor="middle" font-size="12">:3001, failure switches</text>
+  <text x="875" y="221" text-anchor="middle" font-size="12">(dup/delay/reorder/drop)</text>
+
+  <rect x="790" y="260" width="170" height="70" rx="8" fill="#f3e5f5" stroke="#6a1b9a"/>
+  <text x="875" y="286" text-anchor="middle" font-weight="bold">Groq / Gemini</text>
+  <text x="875" y="306" text-anchor="middle" font-size="12">LLM for the assistant</text>
+  <text x="875" y="321" text-anchor="middle" font-size="11" fill="#555">untrusted: no approve tool</text>
+
+  <!-- arrows -->
+  <line x1="190" y1="125" x2="248" y2="125" stroke="#444" marker-end="url(#a)"/>
+  <line x1="365" y1="160" x2="365" y2="178" stroke="#444" marker-end="url(#a)"/>
+  <line x1="365" y1="290" x2="365" y2="308" stroke="#444" marker-end="url(#a)"/>
+  <line x1="480" y1="355" x2="508" y2="380" stroke="#444" marker-end="url(#a)"/>
+  <line x1="480" y1="230" x2="508" y2="160" stroke="#444" marker-end="url(#a)"/>
+  <line x1="620" y1="220" x2="620" y2="238" stroke="#444" marker-end="url(#a)"/>
+  <line x1="620" y1="310" x2="620" y2="328" stroke="#444" marker-end="url(#a)"/>
+  <line x1="730" y1="105" x2="788" y2="105" stroke="#444" marker-end="url(#a)"/>
+  <line x1="788" y1="120" x2="732" y2="135" stroke="#b07a00" marker-end="url(#a)"/>
+  <line x1="730" y1="180" x2="788" y2="195" stroke="#444" marker-end="url(#a)"/>
+  <line x1="788" y1="210" x2="732" y2="195" stroke="#b07a00" marker-end="url(#a)"/>
+  <line x1="480" y1="260" x2="788" y2="295" stroke="#6a1b9a" marker-end="url(#a)"/>
+  <line x1="510" y1="200" x2="482" y2="330" stroke="#2e7d32" marker-end="url(#a)"/>
+
+  <text x="760" y="152" font-size="10" fill="#b07a00">webhooks</text>
+  <text x="560" y="520" font-size="11" fill="#555">Orange arrows: provider webhooks (verified on raw body, stored in the inbox first).</text>
+  <text x="560" y="538" font-size="11" fill="#555">Green arrow: processed events become ledger events (one write path).</text>
+  <text x="20" y="520" font-size="11" fill="#555">Access is never stored: every request asks the decision engine (domain/).</text>
+  <text x="20" y="538" font-size="11" fill="#555">Agent purchases end in an ordinary order + webhook; the ledger has no agent code.</text>
+</svg>

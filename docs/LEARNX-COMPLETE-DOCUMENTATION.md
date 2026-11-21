@@ -665,8 +665,8 @@ text of ADR-000 to ADR-014 is in `docs/Architecture_Decision_Records.md`.
 
 ### Foundation (October and early November)
 
-**ADR-000: Methodology reaffirmation (9 October 2026).** *Status: reaffirmed (author); mentor approval
-reference to add if there is one.* From the start the plan was a **provider-neutral system of orders,
+**ADR-000: Methodology reaffirmation (9 October 2026).** *Status: reaffirmed; no change, so no mentor
+approval was needed. Mentor guidance: go slowly, break the system into components and follow its flow.* From the start the plan was a **provider-neutral system of orders,
 entitlements, projections and decisions**. Payments from any provider become the same internal events, an
 append-only ledger records them, a projection turns them into current entitlements, and a decision engine
 answers "may this user open this now?".
@@ -1033,6 +1033,5 @@ npm run verify                  # 11 suites against DATABASE_URL
 - **Commercial gaps.** Unverified emails, so domain coupons and identity pricing trust the address; no coupon redemption limits; no refund window.
 - **Mock provider admin.** Its admin pages are unauthenticated (local tool).
 - **Monitoring and retention.** No quota usage view for admins; no retention policy for the webhook inbox.
-- **For the author to complete.** A mentor approval reference in ADR-000, if there is one.
 - **Declined restructuring.** A settings module, splitting `admin.js` and `views.js`, error types, lint and a test runner were considered and declined; the code works and is tested as it is.
 - **Toward real AP2.** Signing approvals with the user's own key (passkey, ES256) and adding intent mandates for purchases made while the user is away.

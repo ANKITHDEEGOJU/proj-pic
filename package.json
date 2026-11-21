@@ -15,7 +15,8 @@
     "verify:coupons": "node test/verify-agent-coupons.js",
     "verify:security": "node test/verify-security.js",
     "verify:memory": "node test/verify-domain-memory.js",
-    "verify:failures": "node test/verify-failure-switches.js"
+    "verify:failures": "node test/verify-failure-switches.js",
+    "evaluate": "node evaluation/run-evaluation.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -29,5 +30,8 @@
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "dotenv-cli": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

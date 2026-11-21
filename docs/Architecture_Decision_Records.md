@@ -5,7 +5,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 
 | ADR | Title | Status | Milestones |
 |---|---|---|---|
-| [ADR-000](#adr-000--methodology-reaffirmation-9-october-2026) | Methodology reaffirmation (9 October 2026) | Reaffirmed (mentor reference to add, if any) | All |
+| [ADR-000](#adr-000--methodology-reaffirmation-9-october-2026) | Methodology reaffirmation (9 October 2026) | Reaffirmed | All |
 | [ADR-001](#adr-001--isolate-payment-providers-behind-an-adapter-contract) | Isolate payment providers behind an adapter contract | Accepted | M1, M2 |
 | [ADR-002](#adr-002--append-only-ledger-as-the-source-of-truth-for-access) | Append-only ledger as the source of truth for access | Accepted | M1, M3 |
 | [ADR-003](#adr-003--move-the-ledger-from-memory-to-postgresql) | Move the ledger from memory to PostgreSQL | Accepted (supersedes the in-memory store) | M3 |
@@ -20,17 +20,35 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 | [ADR-012](#adr-012--ap2-inspired-signed-one-time-approval-instead-of-full-ap2) | AP2-inspired signed one-time approval instead of full AP2 | Accepted | M7 |
 | [ADR-013](#adr-013--llm-assistant-as-an-untrusted-agent-groq-no-approve-tool) | LLM assistant as an untrusted agent (Groq, no approve tool) | Accepted | M7 |
 | [ADR-014](#adr-014--agent-pays-through-checkout-saved-card-mandates-removed) | Agent pays through checkout; saved-card mandates removed | Accepted (reverses a same-day experiment) | M7 |
-| ADR-015 – ADR-030 | Decisions of 19–20 Nov (assistant cards, assistant log, pass refund rules, seat return, idempotency, course guides, payment matching, secrets, rate limits, agent coupons, clean-up) | See [PROJECT-OVERVIEW.md §8](PROJECT-OVERVIEW.md#8-decision-log-adr-015-onwards) | M2–M8 |
+| [ADR-015](#adr-015--finished-purchase-cards-leave-the-chat-each-payment-keeps-a-one-line-result) | Finished purchase cards leave the chat; each payment keeps a one-line result | Accepted | M7 |
+| [ADR-016](#adr-016--mock-purchases-through-the-assistant-use-the-mock-checkout-page) | Mock purchases through the assistant use the mock checkout page | Accepted | M7, M2 |
+| [ADR-017](#adr-017--a-failed-model-turn-withdraws-its-half-made-request-limits-show-only-their-message) | A failed model turn withdraws its half-made request; limits show only their message | Accepted | M7 |
+| [ADR-018](#adr-018--append-only-assistant-log-for-admins) | Append-only assistant log for admins | Accepted | M8 |
+| [ADR-019](#adr-019--one-renewal-at-a-time-cancel-renewal-refunds-a-paid-renewal-refund-covers-the-whole-pass) | One renewal at a time; Cancel renewal refunds a paid renewal; Refund covers the whole pass | Accepted (revises ADR-009) | M4, M6 |
+| [ADR-020](#adr-020--seat-checkout-returns-to-the-organization-page-failed-attempts-are-short-notices) | Seat checkout returns to the organization page; failed attempts are short notices | Accepted | M4 |
+| [ADR-021](#adr-021--one-order-per-checkout-click-one-grant-per-admin-form) | One order per checkout click; one grant per admin form | Accepted | M2, M4 |
+| [ADR-022](#adr-022--course-guides-published-by-the-admin-and-opened-only-with-access-checked-per-request) | Course guides published by the admin and opened only with access, checked per request | Accepted | M3, M8 |
+| [ADR-023](#adr-023--a-payment-grants-only-if-amount-and-currency-match-an-order-of-that-user) | A payment grants only if amount and currency match an order of that user | Accepted | M2, M6 |
+| [ADR-024](#adr-024--reconciliation-escalates-refused-replays-as-payment_refused) | Reconciliation escalates refused replays as PAYMENT_REFUSED | Accepted | M6 |
+| [ADR-025](#adr-025--rotate-secrets-refuse-example-values-keep-dev-only-routes-off-by-default) | Rotate secrets, refuse example values, keep dev-only routes off by default | Accepted | Security |
+| [ADR-026](#adr-026--limit-password-guessing-counted-before-the-check-trust-only-a-local-proxy) | Limit password guessing, counted before the check; trust only a local proxy | Accepted | Security |
+| [ADR-027](#adr-027--coupons-on-agent-purchases-pinned-in-the-signed-approval) | Coupons on agent purchases, pinned in the signed approval | Accepted | M4, M7 |
+| [ADR-028](#adr-028--approving-requires-the-amount-the-user-saw-and-re-checks-the-password-rule-atomically) | Approving requires the amount the user saw and re-checks the password rule atomically | Accepted | M7 |
+| [ADR-029](#adr-029--generic-error-messages-with-a-reference) | Generic error messages with a reference | Accepted | Security |
+| [ADR-030](#adr-030--a-light-clean-up-instead-of-a-full-restructure) | A light clean-up instead of a full restructure | Accepted | All |
+| [ADR-031](#adr-031--bound-concurrent-seat-lock-holders-to-avoid-exhausting-the-connection-pool) | Bound concurrent seat-lock holders to avoid exhausting the connection pool | Proposed (not implemented) | M4 |
 
 ---
 
 ## ADR-000 — Methodology reaffirmation (9 October 2026)
 
-- **Date, status & scope:** documented 2026-11-20 (not backdated). Status: **Reaffirmed** (author's statement). Scope: whole project, M1–M8. *Mentor approval reference: author to add, if there is one.*
-- **Approach (author):** from the start the plan was to build a **provider-neutral system of orders, entitlements, projections and decisions**: orders and payments from any provider become the same internal events; an append-only ledger records them; a projection turns the ledger into current entitlements; a decision engine answers "may this user open this now?". The stack chosen for it: **Node.js (Express)** on the server, **PostgreSQL** as the store, and **server-rendered HTML with htmx** for the interface (no front-end build step).
-- **Why this approach and stack:** provider neutrality and access derived from history are what the brief asks for (M1–M3), so they had to be the core rather than an add-on. Node/Express keeps the server small and close to the provider SDKs and webhooks; PostgreSQL gives transactions, unique constraints and triggers to enforce idempotency and append-only rules in the database itself (ADR-003); htmx lets pages update in place (cards, polling, partial refreshes) with plain server-rendered HTML.
-- **Evidence from the repository:** before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct). After 9 Oct the same architecture was extended, not replaced: Razorpay test mode added through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–20 Nov).
-- **Consequences:** every later milestone plugs into the same core (adapters feed the ledger; seats, passes, refunds and agent purchases are events; access is always computed), which is why the core never had to be rewritten.
+- **Date, status & scope:** documented 2026-11-20 (not backdated). Status: **Reaffirmed** by 9 October 2026: the approach was not changed. Scope: whole project, M1–M8. No mentor approval was needed (no fundamental change), and no scored mentor feedback asked for a change.
+- **Context & decision drivers:** the brief asks for payments, subscriptions and entitlements that stay correct whatever the provider does (duplicate, late, reordered or lost events), with access explainable from history and agent purchases kept outside the core. Mentor guidance was to **go slowly, break the system into components and understand the flow of the application** before adding features.
+- **Options considered:** (1) access flags updated directly by each webhook (simple; no history, unsafe under duplicates and races); (2) a payment-orchestration product (e.g. Hyperswitch) in front of the providers plus flags (provider-neutral, but heavy to run and still no entitlements); (3) **an own provider-neutral core: orders, an append-only ledger, a projection and a decision engine**, with providers behind adapters.
+- **Decision & rationale:** option 3, on **Node.js (Express)**, **PostgreSQL** and **server-rendered HTML with htmx** (no front-end build step). Provider neutrality and access derived from history are what the brief asks for (M1–M3), so they had to be the core rather than an add-on. PostgreSQL enforces idempotency and append-only rules in the database itself (ADR-003); htmx gives in-place updates with plain HTML. In line with the mentor's guidance, the work followed the flow one component at a time: ledger → projection → decision, then provider adapters and webhooks, then commercial rules, reconciliation and finally agent purchases (M1 → M8).
+- **Consequences & trade-offs:** + every later milestone plugged into the same core (adapters feed the ledger; seats, passes, refunds and agent purchases are events; access is always computed), so the core never had to be rewritten; − more code than option 1, and a single app instance (in-memory projection, see §8 of the report).
+- **Evidence & validation:** before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct). After 9 Oct the same architecture was extended, not replaced: Razorpay test mode through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–20 Nov). The baseline comparison (`evaluation/`) measures option 1 against option 3: option 1 was wrong in 7 of 7 failure workloads, option 3 in none.
+- **Revisit trigger:** a requirement the event model can't express (for example usage-based billing with millions of events per user), or a need to run several instances that the in-memory projection can't support.
 ---
 
 ## ADR-001 — Isolate payment providers behind an adapter contract
@@ -187,3 +205,175 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Consequences & trade-offs:** + works in the sandbox; − the user must complete a checkout, so the purchase is not fully autonomous. Unused tables and columns remain (`saved_payment_methods`, `purchase_intents.pay_method`, …) as technical debt.
 - **Evidence & validation:** `plan.txt` ("M7 Razorpay saved card … TRIED, REMOVED"); README "Choosing the provider".
 - **Revisit trigger:** Razorpay enabling card mandates on the test account.
+
+---
+
+## ADR-015 — Finished purchase cards leave the chat; each payment keeps a one-line result
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0). Accepted. M7. Components: `src/routes/agent.js` (cards, page script), `src/services/assistant.js` (`noteOutcomes`, `outcomeNote`).
+- **Context & decision drivers:** purchase cards stayed under the chat after the payment finished and piled up; removing them must not lose the record of what happened. Updates arrive by htmx polling, possibly in several open tabs.
+- **Options considered:** (1) keep every card (cluttered); (2) delete finished cards (no record); (3) **fade finished cards out and keep one result line per payment**.
+- **Decision & rationale:** option 3. A finished card shows its final state for `ASSISTANT_CARD_DONE_MS` (5000), then fades and is removed; the app writes one line per payment ("Payment received…", or a red failed/cancelled line) with an atomic `INSERT … WHERE NOT EXISTS`, and every tab that sees the card finish gets the line.
+- **Consequences & trade-offs:** + clean chat with a permanent outcome history; − a small page script; two htmx timing details had to be handled (class set after the swap; out-of-band content applied before the main content).
+- **Evidence & validation:** `test/verify-assistant.js`; E2E A23–A26, A38–A42 (box 198 → 114 → 0 px, line kept), defects D7, D8, D14.
+- **Revisit trigger:** users asking to see finished cards again (e.g. a history panel), or a move away from htmx.
+
+## ADR-016 — Mock purchases through the assistant use the mock checkout page
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0). Accepted; supersedes the mock's server-side instant charge. M7, M2. Components: `src/routes/agent.js` (`paymentStarter`), `mock-provider/server.js` (`back=agent`).
+- **Context & decision drivers:** the mock charged agent purchases instantly on the server, hiding the payment step and behaving differently from Razorpay.
+- **Options considered:** (1) keep the instant charge (fewer clicks); (2) **open the mock checkout page like Razorpay**.
+- **Decision & rationale:** option 2: one payment path for both providers; the mock page returns to `/agent` (Pay / Simulate Failure) or to the "checkout closed" route (Cancel), with return targets from a fixed allow-list.
+- **Consequences & trade-offs:** + the demo shows the real flow and failure buttons; − one more click.
+- **Evidence & validation:** E2E A31–A34, D11; `test/verify-assistant.js` (mock goes through the checkout page).
+- **Revisit trigger:** a need for fully autonomous agent payments in the demo (would require mandates, see ADR-014).
+
+## ADR-017 — A failed model turn withdraws its half-made request; limits show only their message
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0). Accepted. M7. Component: `src/services/assistant.js` (`chat`).
+- **Context & decision drivers:** a Groq rate limit right after `propose_purchase` left an open request the user never saw; asking again then said "you already have an open request".
+- **Options considered:** (1) keep partial results always; (2) discard everything always (loses a started payment); (3) **discard and withdraw if no payment started; keep the steps if one did**.
+- **Decision & rationale:** option 3. Without a started payment the turn stores nothing, releases the message quota and cancels its proposal (actor `system`); after `execute_purchase` the steps are kept so the card still offers Pay. Limit messages are shown as-is, with the provider's wait time.
+- **Consequences & trade-offs:** + nothing hidden or half-done; − the user re-asks after a limit.
+- **Evidence & validation:** `test/verify-assistant.js` (model fails part-way); E2E A35, A36, D12.
+- **Revisit trigger:** a model provider without rate limits, or streaming replies that make partial turns visible.
+
+## ADR-018 — Append-only assistant log for admins
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0). Accepted. M8. Components: table `assistant_log`, `src/services/assistant.js`, `/admin/assistant` in `src/routes/admin.js`.
+- **Context & decision drivers:** the chat history is the model's memory: users can clear it and failed turns are not stored, so nothing remained for monitoring errors, limits, cost or misbehaviour.
+- **Options considered:** (1) reuse the chat table; (2) plain server logs (not searchable, not per user); (3) **a separate append-only table with an admin page**.
+- **Decision & rationale:** option 3: one row per turn (message, reply, replaced model text, tools, flags, model, tokens, duration, IP, error); a trigger blocks UPDATE/DELETE except the hourly purge after `ASSISTANT_LOG_DAYS` (90); admin page with 24-hour totals, search, filters and a per-user view.
+- **Consequences & trade-offs:** + full monitoring, survives Clear chat; − stores personal messages (admin-only, bounded retention).
+- **Evidence & validation:** `test/verify-assistant.js` (log rows, purge, admin-only page); E2E section 9 (L1–L9).
+- **Revisit trigger:** privacy requirements (shorter retention or redaction) or log volume affecting the admin page.
+
+## ADR-019 — One renewal at a time; Cancel renewal refunds a paid renewal; Refund covers the whole pass
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0). Accepted; revises ADR-009. M4, M6. Components: `src/services/subscriptions.js`, refund route, pass card, `orders.refund_scope`.
+- **Context & decision drivers:** users could stack several renewals; Refund removed only the latest period, which the owner considered a "partial refund".
+- **Options considered:** for a renewal already paid when renewal is cancelled: (A) **refund it in full** or (B) keep it as a flag only; for Refund: refund the latest period only, or **every paid period of the current pass**.
+- **Decision & rationale:** owner chose A and the full refund. Renew is hidden and refused (all paths) while a renewal is queued, being paid (`RENEW_PENDING_MINUTES`) or refunded. Refund requests one provider refund per payment (`PASS_FULL`); after all are confirmed the pass's admin/scholarship periods end (`MANUAL_REVOKE`, source SYSTEM).
+- **Consequences & trade-offs:** + no stacked renewals, no partial surprises; − several provider refunds per pass; access stays until the last confirms; a refused part leaves the rest refunded and free time kept.
+- **Evidence & validation:** `test/verify-m4.js` (cancel-renewal refund, full refund, refused part, scholarship ended); E2E section 10 (P1–P7) and X1.
+- **Revisit trigger:** automatic recurring billing becoming available (mandates), or a pro-rata refund policy.
+
+## ADR-020 — Seat checkout returns to the organization page; failed attempts are short notices
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0; notices f7dcab5). Accepted. M4. Components: `src/routes/org.js`, `src/routes/checkout.js` (Razorpay page), `mock-provider/server.js` (`back=org`).
+- **Context & decision drivers:** after buying seats users landed on `/courses`; later, failed or cancelled seat checkouts stayed on `/org` forever as "Waiting for payment … paid $100".
+- **Options considered:** (1) keep the default return; (2) **return to `/org` with the result**; for failed attempts: list them forever, delete the rows, or **show a short fading notice and keep the rows**.
+- **Decision & rationale:** `back=org` accepted from a fixed allow-list by both providers; `/org?checkout=paid|failed|cancelled` note; unpaid packs fade after `ORG_NOTICE_FADE_MS` and are listed only for `ORG_UNPAID_SHOW_SECONDS` after they ended.
+- **Consequences & trade-offs:** + clear feedback, no pile-up; rows kept so a late payment still activates the pack.
+- **Evidence & validation:** `test/verify-idempotency.js` (notice, hidden later, row kept); E2E O1–O3, X2, D18.
+- **Revisit trigger:** users needing a history of failed seat purchases.
+
+## ADR-021 — One order per checkout click; one grant per admin form
+
+- **Date, status & scope:** 2026-11-20 (4cc86c0; refactored into `orders.js` in f7dcab5). Accepted. M2, M4. Components: `src/services/checkoutOnce.js`, cart and seat checkout, admin grant form.
+- **Context & decision drivers:** checking the brief's "all state-changing operations idempotent" found two gaps: a double click created two pending orders, and a double-submitted scholarship grant gave two pass periods.
+- **Options considered:** (1) disable buttons only (client-side, not reliable); (2) reuse any open pending order of the user (wrong across carts); (3) **one-time form keys checked on the server**.
+- **Decision & rationale:** option 3 (plus disabled buttons). Checkout: an advisory lock per key, the key stored on the order, repeats redirected to the stored checkout link; grants: the form key is the ledger event id, so a repeat is a `DUPLICATE_EVENT`.
+- **Consequences & trade-offs:** + exactly one effect per click; − small form plumbing.
+- **Evidence & validation:** `test/verify-idempotency.js` (3 simultaneous + 1 late submit → one order / one pack / one grant).
+- **Revisit trigger:** a public API for checkout (would need a client-supplied idempotency key header).
+
+## ADR-022 — Course guides published by the admin and opened only with access, checked per request
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. M3, M8. Components: `content/*.md`, `src/services/courseDocs.js`, `src/services/markdown.js`, `src/routes/content.js`, tables `course_docs`, `course_doc_events`.
+- **Context & decision drivers:** access was computed correctly but nothing was behind it. Owner asked for the simplest version: exactly one guide per course, added from the admin page, opened only when paid.
+- **Options considered:** (1) store "can read" flags at purchase (contradicts M3); (2) check once at purchase; (3) **ask the access decision on every request**.
+- **Decision & rationale:** option 3, with a 30 s re-check on open pages, `Cache-Control: no-store`, no title on refused pages, an escaped Markdown renderer and an append-only publishing history.
+- **Consequences & trade-offs:** + refund, revoke and pass expiry close the guide on time with no extra event; − polling traffic while a guide is open.
+- **Evidence & validation:** `test/verify-content.js`; E2E section 12 (guide closed within 30 s of a refund and at the exact pass end) and section 13 (30 attacks, 0 leaks).
+- **Revisit trigger:** large media content (would need signed, short-lived URLs).
+
+## ADR-023 — A payment grants only if amount and currency match an order of that user
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. M2, M6. Component: `src/payment/webhookProcessor.js` (`#underpaid`, `#orderMismatch`).
+- **Context & decision drivers:** the security test showed paying 0.01 instead of 50.00 on the mock form opened the guide (and the ledger even recorded 50.00); a forged message could name products without any order; the review then showed currency was not compared.
+- **Options considered:** (1) trust the provider amount and let reconciliation report mismatches later; (2) **refuse at the source**.
+- **Decision & rationale:** option 2: the purchase must name one of our orders, owned by the same user, with paid amount ≥ total and the order's currency; otherwise `UNDERPAID` / `NO_MATCHING_ORDER`, nothing granted; a later full payment completes the order.
+- **Consequences & trade-offs:** + no access without full payment; − a genuine partial payment is refused and escalated instead of granted.
+- **Evidence & validation:** `test/verify-m4.js` (0.01, JPY, no order, another user's order); `evaluation/` S4 (baseline 10 wrongly granted per run, LEARNX 0).
+- **Revisit trigger:** multi-currency pricing or instalment payments.
+
+## ADR-024 — Reconciliation escalates refused replays as PAYMENT_REFUSED
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. M6. Component: `src/payment/reconcile.js`.
+- **Context & decision drivers:** after ADR-023, a replayed payment that the processor refused was still counted as "fixed".
+- **Options considered:** (1) keep counting it fixed; (2) **open an issue for the admin**.
+- **Decision & rationale:** option 2: a refused replay (now or earlier) becomes an open `PAYMENT_REFUSED` issue; nothing is hidden.
+- **Consequences & trade-offs:** + honest repair statistics; − more items for the admin.
+- **Evidence & validation:** `test/verify-m2-m6.js` (54.00 paid for 55.00: refused, `AMOUNT_MISMATCH` + `PAYMENT_REFUSED`, no access).
+- **Revisit trigger:** an automatic partial-refund flow for underpayments.
+
+## ADR-025 — Rotate secrets, refuse example values, keep dev-only routes off by default
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8; secrets rotated in the local `.env`, never committed). Accepted. Security. Components: `src/server.js`, `src/payment/adapters/mock.js`, `src/routes/commerce.js`.
+- **Context & decision drivers:** `JWT_SECRET` and `MOCK_WEBHOOK_SECRET` equalled the public `.env.example` values (forge an admin session, forge a payment); `/api/dev/events` let any user write purchases; the mock adapter had a built-in default secret.
+- **Options considered:** (1) document the risk only; (2) **rotate, warn/refuse at startup, remove defaults, gate the dev route**.
+- **Decision & rationale:** option 2 (owner approved): new 64-hex secrets; startup warns (refuses with `NODE_ENV=production`) on example or short secrets; no default mock secret (constant-time compare); dev route only with `ENABLE_DEV_EVENTS=1` and admin.
+- **Consequences & trade-offs:** + forged sessions and webhooks rejected; − everyone signed out once; the mock must be restarted after `.env` changes.
+- **Evidence & validation:** `test/verify-security.js`; E2E section 13 (S8–S10) and section 15 (re-run: 401 / 302).
+- **Revisit trigger:** a deployment with a secrets manager.
+
+## ADR-026 — Limit password guessing, counted before the check; trust only a local proxy
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. Security. Components: `src/services/rateLimit.js`, `src/routes/auth.js`, step-up in `src/routes/agent.js`, `trust proxy` in `src/server.js`.
+- **Context & decision drivers:** no limits on login, sign-up or the approval password; the review then showed parallel guesses slipped past counts taken after bcrypt, and behind ngrok all visitors share 127.0.0.1.
+- **Options considered:** (1) a library such as express-rate-limit (new dependency, same in-memory limits); (2) Redis-backed limits (new service); (3) **a small in-memory limiter**.
+- **Decision & rationale:** option 3: per email+IP (5), per email from any IP (50), per IP (30) per 15 minutes; sign-up 10 per IP per hour; approval password 5 per user; counted before the password check and cleared on success; `TRUST_PROXY=loopback`; admin email cannot be registered.
+- **Consequences & trade-offs:** + guessing and parallel bursts limited, no new dependency; − counters reset on restart and assume one instance.
+- **Evidence & validation:** `test/verify-security.js` (10 parallel guesses → at most 3 checked; per-visitor IPs; admin email reserved).
+- **Revisit trigger:** running more than one instance (move counters to the database or Redis).
+
+## ADR-027 — Coupons on agent purchases, pinned in the signed approval
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. M4, M7. Components: `src/services/agentPurchase.js` (`quote`, `setCoupon`), assistant tool `couponCode`, card coupon field; columns `list_amount_cents`, `discount_cents`, `coupon_code`, `coupon_rule_id`.
+- **Context & decision drivers:** agents always paid the list price; the owner asked for coupons. A coupon must never change the amount the user approved.
+- **Options considered:** (1) apply coupons only at checkout (amount differs from the approval); (2) **validate when proposing or on the card, and pin the result in the approval**.
+- **Decision & rationale:** option 2: the cart's rules (`validateCoupon`); only codes the user typed; owner-only Apply/Remove while PROPOSED; the token pins list price and coupon; execute re-checks the coupon; free results refused; the order records discount and rule.
+- **Consequences & trade-offs:** + the user always pays exactly what was approved; − a coupon that expires between approval and payment fails the purchase (`COUPON_INVALID`).
+- **Evidence & validation:** `test/verify-agent-coupons.js`; E2E section 14 (20.00 → 19.00 with Groq; ledger 19.00).
+- **Revisit trigger:** coupon redemption limits (would need reservation at approval time).
+
+## ADR-028 — Approving requires the amount the user saw and re-checks the password rule atomically
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. M7. Components: `approve()` in `src/services/agentPurchase.js`, approve forms in `src/routes/agent.js`.
+- **Context & decision drivers:** with coupons the price can change while a request waits; the review found a race (remove the coupon while approving without a password → a higher amount approved without the password).
+- **Options considered:** (1) re-read the request before approving (still racy); (2) **put both conditions into the single approving UPDATE**.
+- **Decision & rationale:** option 2: every Approve form carries the shown amount (missing = "out of date"); the UPDATE requires `amount_cents = shown` and, when no password was entered, `amount_cents ≤ threshold` (`STEP_UP_REQUIRED`).
+- **Consequences & trade-offs:** + no approval of an amount the user didn't see; − an old open form must be reloaded.
+- **Evidence & validation:** `test/verify-agent-coupons.js` (stale card, step-up race), `test/verify-m7.js` (form without amount refused).
+- **Revisit trigger:** a different approval UI (e.g. a mobile app) — it must send the shown amount too.
+
+## ADR-029 — Generic error messages with a reference
+
+- **Date, status & scope:** 2026-11-20 (1c53ec8). Accepted. Security. Component: `src/errorHandler.js`, checkout error paths.
+- **Context & decision drivers:** SQL and provider error text could reach the browser.
+- **Options considered:** (1) show raw errors (helpful in development, leaks internals); (2) **generic message + reference, details only in the log**.
+- **Decision & rationale:** option 2: "Server error (ref abc12345)"; checkout failures say "Checkout failed. Nothing was charged."; domain errors with user-meaningful text are still shown.
+- **Consequences & trade-offs:** + no internal details leaked; − debugging needs the server log.
+- **Evidence & validation:** `test/verify-security.js` (no internal text, reference present).
+- **Revisit trigger:** a central log/monitoring service (the reference would link to it).
+
+## ADR-030 — A light clean-up instead of a full restructure
+
+- **Date, status & scope:** 2026-11-20 (f7dcab5). Accepted. All milestones (code quality). Components: `src/services/orders.js`, `src/services/refunds.js`, `src/views.js` helpers, `test/`.
+- **Context & decision drivers:** an independent structure review found a well-designed core, but routes doing too much, order creation written 4×, the refund flow 2×, a lookup helper 4×, settings read in 17 files and tests inside `src/`.
+- **Options considered:** (1) **targeted de-duplication**; (2) full restructure (config module, repositories, split `admin.js`/`views.js`, error types, lint, `node:test`, CI); (3) leave as is.
+- **Decision & rationale:** option 1; the owner declined option 2 as unnecessary for the submission. A formatter (Prettier) was set up and then removed at the owner's request.
+- **Consequences & trade-offs:** + one place each for orders and refunds, tests separated, dead code gone, behaviour unchanged (11 suites passed after every step); − the largest files remain large.
+- **Evidence & validation:** commit f7dcab5; `npm run verify` 11/11; no import cycles (checked).
+- **Revisit trigger:** more contributors, or a feature that needs a third copy of an existing flow.
+
+## ADR-031 — Bound concurrent seat-lock holders to avoid exhausting the connection pool
+
+- **Date, status & scope:** 2026-11-20 (found by the evaluation). **Proposed, not implemented.** The fix was written and tested, then left out of the final revision on purpose: the final phase was limited to documentation, and the defect needs a burst of 10 or more simultaneous assignments to one pack. M4. Component: `withPoolLock` in `src/services/seats.js`.
+- **Context & decision drivers:** a first version of evaluation workload S6 (10 simultaneous assignments to one pack) froze the whole app. Each assignment holds a pooled connection while it waits on the pack's advisory lock, and the holder needs further connections (pack read, ledger write) that are all taken (pool of 10). Correctness is not affected (never more seats than bought); availability is.
+- **Options considered:** (1) a bigger pool (only moves the threshold); (2) pass one client through the ledger store (larger change to the domain store API); (3) queue seat operations in memory and let at most N hold a connection, reading the pack on the same connection; (4) **keep the current code, document the defect and track it as an issue**.
+- **Decision & rationale:** option 4 for this submission (judgment: no code changes in the final documentation phase; the trigger needs an unusual burst). Option 3 is the intended fix: a prototype (N = 4) passed 12 simultaneous assignments with exactly 1 seat taken, and the test hung with the queue disabled (measured 2026-11-20).
+- **Consequences & trade-offs:** + the submitted code is the code that was tested end to end; − 10 or more simultaneous seat assignments can freeze the app until it is restarted. The evaluation runs S6 with 6 parallel assignments (below the pool size) and reports the freeze separately.
+- **Evidence & validation:** the freeze observed in the first S6 run; `evaluation/README.md` ("Known defect"); prototype results above. Tracked as a GitHub issue (report §9, task 1).
+- **Revisit trigger:** organizations assigning seats in bulk, or any other code path that holds a pooled connection while waiting on a lock.

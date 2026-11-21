@@ -1,0 +1,460 @@
+{
+  "meta": {
+    "date": "2026-11-21T05:06:01.234Z",
+    "commit": "3e7cc05",
+    "uncommittedSourceChanges": false,
+    "runs": 5,
+    "size": 10,
+    "seed": 42,
+    "node": "v24.21.0",
+    "postgres": "17.10 (Ubuntu 17.10-0ubuntu0.25.10.1)",
+    "os": "Linux 6.17.0-41-generic",
+    "cpu": "Intel(R) Core(TM) i7-14700",
+    "cpus": 28,
+    "course": {
+      "id": "intro-to-sql",
+      "priceCents": 2000
+    }
+  },
+  "results": {
+    "S1": {
+      "name": "Duplicate webhook delivery (each payment delivered 3x, shuffled, concurrent)",
+      "expected": "one purchase and one charge per payment",
+      "baseline": [
+        {
+          "recordedPurchases": 30,
+          "recordedRevenueCents": 60000,
+          "revenueErrorPct": 200,
+          "errors": 20
+        },
+        {
+          "recordedPurchases": 30,
+          "recordedRevenueCents": 60000,
+          "revenueErrorPct": 200,
+          "errors": 20
+        },
+        {
+          "recordedPurchases": 30,
+          "recordedRevenueCents": 60000,
+          "revenueErrorPct": 200,
+          "errors": 20
+        },
+        {
+          "recordedPurchases": 30,
+          "recordedRevenueCents": 60000,
+          "revenueErrorPct": 200,
+          "errors": 20
+        },
+        {
+          "recordedPurchases": 30,
+          "recordedRevenueCents": 60000,
+          "revenueErrorPct": 200,
+          "errors": 20
+        }
+      ],
+      "system": [
+        {
+          "recordedPurchases": 10,
+          "recordedRevenueCents": 20000,
+          "revenueErrorPct": 0,
+          "errors": 0
+        },
+        {
+          "recordedPurchases": 10,
+          "recordedRevenueCents": 20000,
+          "revenueErrorPct": 0,
+          "errors": 0
+        },
+        {
+          "recordedPurchases": 10,
+          "recordedRevenueCents": 20000,
+          "revenueErrorPct": 0,
+          "errors": 0
+        },
+        {
+          "recordedPurchases": 10,
+          "recordedRevenueCents": 20000,
+          "revenueErrorPct": 0,
+          "errors": 0
+        },
+        {
+          "recordedPurchases": 10,
+          "recordedRevenueCents": 20000,
+          "revenueErrorPct": 0,
+          "errors": 0
+        }
+      ]
+    },
+    "S2": {
+      "name": "Reordered events (refund arrives before its purchase)",
+      "expected": "no access after a refund",
+      "baseline": [
+        {
+          "usersWithAccessAfterRefund": 10,
+          "errors": 10
+        },
+        {
+          "usersWithAccessAfterRefund": 10,
+          "errors": 10
+        },
+        {
+          "usersWithAccessAfterRefund": 10,
+          "errors": 10
+        },
+        {
+          "usersWithAccessAfterRefund": 10,
+          "errors": 10
+        },
+        {
+          "usersWithAccessAfterRefund": 10,
+          "errors": 10
+        }
+      ],
+      "system": [
+        {
+          "usersWithAccessAfterRefund": 0,
+          "earlyRefundsDeferred": 10,
+          "errors": 0
+        },
+        {
+          "usersWithAccessAfterRefund": 0,
+          "earlyRefundsDeferred": 10,
+          "errors": 0
+        },
+        {
+          "usersWithAccessAfterRefund": 0,
+          "earlyRefundsDeferred": 10,
+          "errors": 0
+        },
+        {
+          "usersWithAccessAfterRefund": 0,
+          "earlyRefundsDeferred": 10,
+          "errors": 0
+        },
+        {
+          "usersWithAccessAfterRefund": 0,
+          "earlyRefundsDeferred": 10,
+          "errors": 0
+        }
+      ]
+    },
+    "S3": {
+      "name": "Lost webhooks (30 % of payment webhooks dropped), then reconciliation",
+      "expected": "every paying user has access after recovery",
+      "baseline": [
+        {
+          "dropped": 3,
+          "payingUsersWithoutAccess": 3,
+          "errors": 3
+        },
+        {
+          "dropped": 3,
+          "payingUsersWithoutAccess": 3,
+          "errors": 3
+        },
+        {
+          "dropped": 3,
+          "payingUsersWithoutAccess": 3,
+          "errors": 3
+        },
+        {
+          "dropped": 3,
+          "payingUsersWithoutAccess": 3,
+          "errors": 3
+        },
+        {
+          "dropped": 3,
+          "payingUsersWithoutAccess": 3,
+          "errors": 3
+        }
+      ],
+      "system": [
+        {
+          "dropped": 3,
+          "withoutAccessBeforeRecon": 3,
+          "payingUsersWithoutAccess": 0,
+          "reconFixed": 3,
+          "errors": 0
+        },
+        {
+          "dropped": 3,
+          "withoutAccessBeforeRecon": 3,
+          "payingUsersWithoutAccess": 0,
+          "reconFixed": 3,
+          "errors": 0
+        },
+        {
+          "dropped": 3,
+          "withoutAccessBeforeRecon": 3,
+          "payingUsersWithoutAccess": 0,
+          "reconFixed": 3,
+          "errors": 0
+        },
+        {
+          "dropped": 3,
+          "withoutAccessBeforeRecon": 3,
+          "payingUsersWithoutAccess": 0,
+          "reconFixed": 3,
+          "errors": 0
+        },
+        {
+          "dropped": 3,
+          "withoutAccessBeforeRecon": 3,
+          "payingUsersWithoutAccess": 0,
+          "reconFixed": 3,
+          "errors": 0
+        }
+      ]
+    },
+    "S4": {
+      "name": "Tampered payments (half pay 0.01, half pay the right number in JPY)",
+      "expected": "no access for an underpayment",
+      "baseline": [
+        {
+          "wronglyGranted": 10,
+          "errors": 10
+        },
+        {
+          "wronglyGranted": 10,
+          "errors": 10
+        },
+        {
+          "wronglyGranted": 10,
+          "errors": 10
+        },
+        {
+          "wronglyGranted": 10,
+          "errors": 10
+        },
+        {
+          "wronglyGranted": 10,
+          "errors": 10
+        }
+      ],
+      "system": [
+        {
+          "wronglyGranted": 0,
+          "errors": 0
+        },
+        {
+          "wronglyGranted": 0,
+          "errors": 0
+        },
+        {
+          "wronglyGranted": 0,
+          "errors": 0
+        },
+        {
+          "wronglyGranted": 0,
+          "errors": 0
+        },
+        {
+          "wronglyGranted": 0,
+          "errors": 0
+        }
+      ]
+    },
+    "S5": {
+      "name": "Quota under concurrency (50 parallel requests, limit 10)",
+      "expected": "exactly 10 accepted",
+      "baseline": [
+        {
+          "accepted": 50,
+          "errors": 40
+        },
+        {
+          "accepted": 50,
+          "errors": 40
+        },
+        {
+          "accepted": 50,
+          "errors": 40
+        },
+        {
+          "accepted": 50,
+          "errors": 40
+        },
+        {
+          "accepted": 50,
+          "errors": 40
+        }
+      ],
+      "system": [
+        {
+          "accepted": 10,
+          "errors": 0
+        },
+        {
+          "accepted": 10,
+          "errors": 0
+        },
+        {
+          "accepted": 10,
+          "errors": 0
+        },
+        {
+          "accepted": 10,
+          "errors": 0
+        },
+        {
+          "accepted": 10,
+          "errors": 0
+        }
+      ]
+    },
+    "S6": {
+      "name": "Last seat race (1-seat pack, 6 parallel assignments)",
+      "expected": "exactly 1 seat in use",
+      "baseline": [
+        {
+          "seatsInUse": 6,
+          "errors": 5
+        },
+        {
+          "seatsInUse": 6,
+          "errors": 5
+        },
+        {
+          "seatsInUse": 6,
+          "errors": 5
+        },
+        {
+          "seatsInUse": 6,
+          "errors": 5
+        },
+        {
+          "seatsInUse": 6,
+          "errors": 5
+        }
+      ],
+      "system": [
+        {
+          "seatsInUse": 1,
+          "errors": 0
+        },
+        {
+          "seatsInUse": 1,
+          "errors": 0
+        },
+        {
+          "seatsInUse": 1,
+          "errors": 0
+        },
+        {
+          "seatsInUse": 1,
+          "errors": 0
+        },
+        {
+          "seatsInUse": 1,
+          "errors": 0
+        }
+      ]
+    },
+    "S7": {
+      "name": "Approval replay (one approval executed 5x in parallel)",
+      "expected": "exactly 1 order",
+      "baseline": [
+        {
+          "ordersCreated": 5,
+          "errors": 4
+        },
+        {
+          "ordersCreated": 5,
+          "errors": 4
+        },
+        {
+          "ordersCreated": 5,
+          "errors": 4
+        },
+        {
+          "ordersCreated": 5,
+          "errors": 4
+        },
+        {
+          "ordersCreated": 5,
+          "errors": 4
+        }
+      ],
+      "system": [
+        {
+          "ordersCreated": 1,
+          "errors": 0
+        },
+        {
+          "ordersCreated": 1,
+          "errors": 0
+        },
+        {
+          "ordersCreated": 1,
+          "errors": 0
+        },
+        {
+          "ordersCreated": 1,
+          "errors": 0
+        },
+        {
+          "ordersCreated": 1,
+          "errors": 0
+        }
+      ]
+    },
+    "S8": {
+      "name": "Cost of the safety: time to process one payment webhook",
+      "expected": "informational (ms)",
+      "baseline": [
+        {
+          "p50ms": 0.8,
+          "p95ms": 0.8,
+          "errors": 0
+        },
+        {
+          "p50ms": 0.8,
+          "p95ms": 1.7,
+          "errors": 0
+        },
+        {
+          "p50ms": 0.7,
+          "p95ms": 0.8,
+          "errors": 0
+        },
+        {
+          "p50ms": 0.7,
+          "p95ms": 1.6,
+          "errors": 0
+        },
+        {
+          "p50ms": 0.7,
+          "p95ms": 1.2,
+          "errors": 0
+        }
+      ],
+      "system": [
+        {
+          "p50ms": 4.7,
+          "p95ms": 5.7,
+          "errors": 0
+        },
+        {
+          "p50ms": 5.3,
+          "p95ms": 9.2,
+          "errors": 0
+        },
+        {
+          "p50ms": 4.8,
+          "p95ms": 6.4,
+          "errors": 0
+        },
+        {
+          "p50ms": 4.6,
+          "p95ms": 5.8,
+          "errors": 0
+        },
+        {
+          "p50ms": 3.5,
+          "p95ms": 5,
+          "errors": 0
+        }
+      ]
+    }
+  }
+}

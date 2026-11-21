@@ -1,5 +1,9 @@
 # Learnx
 
+**CS5903 project 7, group 46** · Provider-neutral payments, subscriptions, entitlements and agent-mediated commerce ·
+Report: [`docs/Project_Report.pdf`](docs/Project_Report.pdf) · Decisions: [`docs/Architecture_Decision_Records.md`](docs/Architecture_Decision_Records.md) ·
+Evaluation: [`evaluation/`](evaluation/) · Tests: [`test/`](test/) · E2E evidence: [`docs/E2E-TESTS.md`](docs/E2E-TESTS.md)
+
 A course storefront built with Node.js, Express and PostgreSQL. Users can browse courses, add them to a cart, apply coupons, and pay through Razorpay (test mode) or a bundled mock payment provider. Course access is tracked in an append-only commerce ledger driven by payment webhooks.
 
 ## Features
@@ -16,10 +20,27 @@ A course storefront built with Node.js, Express and PostgreSQL. Users can browse
 - **Course guides**: one document per course, published by the admin; a learner can open it only while they have access (purchase, pass, seat, grant), and it closes on refund or when the pass ends
 - Admin **Assistant Log**: every assistant chat turn (message, reply, tools, model, tokens, errors), admin only, kept even when a user clears their chat
 
+## Status
+
+| Milestone | Status | Evidence |
+|---|---|---|
+| M1 Transaction model | Completed | `test/verify-domain-memory.js`, `test/verify-domain-pg.js` |
+| M2 Adapter + idempotency | Completed | `test/verify-m2-m6.js`, `test/verify-failure-switches.js`, evaluation S1–S2 |
+| M3 Entitlement ledger | Completed | `test/verify-domain-pg.js`, `test/verify-content.js` |
+| M4 Commercial rules (coupons, seats, pass) | Completed, one known defect: 10 or more simultaneous seat assignments to one pack can freeze the app (ADR-031) | `test/verify-m4.js`, `test/verify-idempotency.js`, evaluation S6 |
+| M5 Usage quotas | Completed | `test/verify-m5.js`, evaluation S5 |
+| M6 Refund + reconciliation | Completed | `test/verify-m2-m6.js`, evaluation S3–S4 |
+| M7 Agent-mediated purchase (AP2-inspired) | Completed (full AP2 not adopted, see ADR-012) | `test/verify-m7.js`, `test/verify-assistant.js`, `test/verify-agent-coupons.js`, evaluation S7 |
+| M8 Audit + failure validation | Completed | `test/verify-failure-switches.js`, `docs/E2E-TESTS.md` |
+| Automatic pass renewal (recurring payments) | Not implemented (Razorpay test account has no card mandates, ADR-014) | — |
+| Running several app instances | Not supported (in-memory projection and counters) | — |
+
 ## Requirements
 
-- Node.js 18+
-- PostgreSQL
+- Node.js 18 or newer (tested with 24.21)
+- PostgreSQL 14 or newer (tested with 17.10)
+- Exact package versions are pinned by `package-lock.json` (`npm ci` installs exactly those)
+- Optional: a Razorpay **test-mode** account (free) and ngrok for Razorpay webhooks; a free Groq API key for the assistant. Everything else (mock provider, tests, evaluation) runs without accounts.
 
 ## Setup
 
@@ -62,6 +83,25 @@ Then open http://localhost:3000/login, register an account, and visit `/courses`
 Set `LOG_REQUESTS=1` to log every POST request with its form fields while debugging (passwords and tokens are redacted); it is off by default.
 
 Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port 3000 in use), another instance is still running: find it with `ss -ltnp | grep :3000` (or `lsof -i :3000`) and stop it (`kill <pid>`), then start again. The same applies to the mock provider on port 3001. After changing code in `mock-provider/`, restart the mock provider too.
+
+## Example: input and expected output
+
+| Do this | Expected |
+|---|---|
+| `npm run verify` | 11 lines ending in `… CHECKS PASSED`, exit code 0 |
+| `node evaluation/run-evaluation.js` | Prints one line per workload, e.g. `S1 … baseline errors/run 20, LEARNX errors/run 0`, and writes `evaluation/results/RESULTS.md` |
+| Register, add **Intro to SQL** to the cart, checkout with **Mock**, press **Pay** | Back on Courses; the card says **Owned**; **Access** shows `Allowed · ACTIVE_PURCHASE`; **Open guide** appears once the admin has published the guides |
+| Click **Refund** on that course | "Refund pending" briefly, then **Refunded**; **Access** shows `Denied · PURCHASE_REFUNDED`; the guide answers "…refunded, so its guide is closed." |
+| On `/agent` type "Buy Intro to SQL with coupon code DEMO" (needs `GROQ_API_KEY` and the DEMO coupon) | A card ~~20.00 USD~~ 19.00 USD with Approve; after Approve and Pay: "Payment received: Intro to SQL is now in your library" |
+
+## Operations
+
+- **Start:** `npm start` (app, port 3000) and `cd mock-provider && node server.js` (mock, port 3001). For Razorpay webhooks, expose port 3000 with ngrok and set the webhook URL in the Razorpay test dashboard to `https://<tunnel>/webhooks/razorpay`.
+- **Stop:** Ctrl+C in each terminal. If port 3000 is busy: `ss -ltnp | grep :3000`, then `kill <pid>`.
+- **Reset / update the database:** `npm run db:init` (safe to re-run). Test users (`*@test.local`) stay in the ledger by design.
+- **Logs:** both servers log to their terminal. An error page shows `Server error (ref abc12345)`; search the app log for that reference. Set `LOG_REQUESTS=1` to log every POST (passwords redacted).
+- **Common problems:** mock payments stay pending → the mock still has an old `MOCK_WEBHOOK_SECRET`: restart it after any `.env` change. Mock checkout page doesn't open → `MOCK_PROVIDER_URL` points at an offline tunnel: start the app with `MOCK_PROVIDER_URL=http://localhost:3001`. The assistant says it reached its limit → Groq free-tier rate limit: wait, or add `GEMINI_API_KEY`.
+- **External services and costs:** Razorpay test mode (free, test cards only, no real money), Groq (free tier, rate-limited), ngrok (free tier). None are needed for the tests or the evaluation.
 
 ## Commercial rules
 
@@ -366,4 +406,5 @@ test/                  npm run verify suites (verify-*.js) and test fixtures; th
 ```bash
 npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model), idempotency (one order / grant per click), course guide (access-checked content), agent coupon and security (limits, forged sessions, dev route, error text) checks against Postgres
 npm run verify:failures   # live: mock failure switches end to end (both servers running, settings at the top of the script)
+npm run evaluate          # baseline vs LEARNX on 8 workloads -> evaluation/results/ (see evaluation/README.md)
 ```
