@@ -6,8 +6,8 @@
 | **Group** | **46** (single member) |
 | **Member** | **Ankith Deegoju** (GitHub: ANKITHDEEGOJU) |
 | **Repository** | https://github.com/ANKITHDEEGOJU/proj-pic |
-| **Final revision** | tag `cs5903-final-2026`, commit `<SHA>` |
-| **Demo** | local (see README "Running"); demo video: `<LINK>` |
+| **Final revision** | tag `cs5903-final-2026` (code at commit [`4fd641e`](https://github.com/ANKITHDEEGOJU/proj-pic/commit/4fd641e7a4329f737a1cec0928aa53e6cf249fb5)) |
+| **Demo** | local (see README "Running"); demo video: [https://youtu.be/8UcpYaqJXaA](https://youtu.be/8UcpYaqJXaA) |
 
 ## Executive summary
 
@@ -314,7 +314,7 @@ co-managers for an organization, building on ADR-023.
 - tests and evaluation;
 - documentation.
 
-Main commits (19 in total, 1 October to 20 November 2026; full history in the repository):
+Main commits (27 up to `4fd641e`, 1 October to 21 November 2026; full history in the repository):
 
 | Area | Commits |
 |---|---|
@@ -324,6 +324,7 @@ Main commits (19 in total, 1 October to 20 November 2026; full history in the re
 | Quotas and failure switches (M5, M8) | [7d1b6d3](https://github.com/ANKITHDEEGOJU/proj-pic/commit/7d1b6d3) |
 | Agent purchases and assistant (M7) | [7dd197d](https://github.com/ANKITHDEEGOJU/proj-pic/commit/7dd197d), [4cc86c0](https://github.com/ANKITHDEEGOJU/proj-pic/commit/4cc86c0), [1c53ec8](https://github.com/ANKITHDEEGOJU/proj-pic/commit/1c53ec8) |
 | Clean-up and documentation | [f7dcab5](https://github.com/ANKITHDEEGOJU/proj-pic/commit/f7dcab5), [3e7cc05](https://github.com/ANKITHDEEGOJU/proj-pic/commit/3e7cc05) |
+| Evaluation, admin pages, organizations, late refunds, final documents (21 Nov) | [e52cd88](https://github.com/ANKITHDEEGOJU/proj-pic/commit/e52cd88), [9c6d3e2](https://github.com/ANKITHDEEGOJU/proj-pic/commit/9c6d3e2), [c7b9462](https://github.com/ANKITHDEEGOJU/proj-pic/commit/c7b9462), [8203558](https://github.com/ANKITHDEEGOJU/proj-pic/commit/8203558), [4fd641e](https://github.com/ANKITHDEEGOJU/proj-pic/commit/4fd641e) |
 
 **AI use.** Claude (Anthropic), used through the Claude Code tool, was an assistant for implementation,
 tests, documentation, reviews and the text of the three course guides (`content/*.md`).

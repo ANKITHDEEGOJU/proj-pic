@@ -2,7 +2,7 @@
 
 **CS5903 project 7, group 46** · Provider-neutral payments, subscriptions, entitlements and agent-mediated commerce ·
 Report: [`docs/Project_Report.pdf`](docs/Project_Report.pdf) · Decisions: [`docs/Architecture_Decision_Records.md`](docs/Architecture_Decision_Records.md) ·
-Evaluation: [`evaluation/`](evaluation/) · Tests: [`test/`](test/) · E2E evidence: [`docs/E2E-TESTS.md`](docs/E2E-TESTS.md)
+Evaluation: [`evaluation/`](evaluation/) · Tests: [`test/`](test/) · E2E evidence: [`docs/E2E-TESTS.md`](docs/E2E-TESTS.md) · Demo video: [https://youtu.be/8UcpYaqJXaA](https://youtu.be/8UcpYaqJXaA)
 
 A course storefront built with Node.js, Express and PostgreSQL. Users can browse courses, add them to a cart, apply coupons, and pay through Razorpay (test mode) or a bundled mock payment provider. Course access is tracked in an append-only commerce ledger driven by payment webhooks.
 
