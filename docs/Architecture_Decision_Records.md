@@ -37,6 +37,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 | [ADR-029](#adr-029--generic-error-messages-with-a-reference) | Generic error messages with a reference | Accepted | Security |
 | [ADR-030](#adr-030--a-light-clean-up-instead-of-a-full-restructure) | A light clean-up instead of a full restructure | Accepted | All |
 | [ADR-031](#adr-031--bound-concurrent-seat-lock-holders-to-avoid-exhausting-the-connection-pool) | Bound concurrent seat-lock holders to avoid exhausting the connection pool | Proposed (not implemented) | M4 |
+| [ADR-032](#adr-032--evaluate-against-two-baselines-naive-and-careful) | Evaluate against two baselines: naive and careful | Accepted | Evaluation |
 
 ---
 
@@ -47,7 +48,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Options considered:** (1) access flags updated directly by each webhook (simple; no history, unsafe under duplicates and races); (2) a payment-orchestration product (e.g. Hyperswitch) in front of the providers plus flags (provider-neutral, but heavy to run and still no entitlements); (3) **an own provider-neutral core: orders, an append-only ledger, a projection and a decision engine**, with providers behind adapters.
 - **Decision & rationale:** option 3, on **Node.js (Express)**, **PostgreSQL** and **server-rendered HTML with htmx** (no front-end build step). Provider neutrality and access derived from history are what the brief asks for (M1–M3), so they had to be the core rather than an add-on. PostgreSQL enforces idempotency and append-only rules in the database itself (ADR-003); htmx gives in-place updates with plain HTML. In line with the mentor's guidance, the work followed the flow one component at a time: ledger → projection → decision, then provider adapters and webhooks, then commercial rules, reconciliation and finally agent purchases (M1 → M8).
 - **Consequences & trade-offs:** + every later milestone plugged into the same core (adapters feed the ledger; seats, passes, refunds and agent purchases are events; access is always computed), so the core never had to be rewritten; − more code than option 1, and a single app instance (in-memory projection, see §8 of the report).
-- **Evidence & validation:** before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct). After 9 Oct the same architecture was extended, not replaced: Razorpay test mode through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–20 Nov). The baseline comparison (`evaluation/`) measures option 1 against option 3: option 1 was wrong in 7 of 7 failure workloads, option 3 in none.
+- **Evidence & validation:** before 9 Oct: Phase 0 setup (2a1f4c3, 1 Oct); ledger → projection → entitlement engine with mock checkout and refund (f379e0d, 2 Oct); ledger moved to PostgreSQL (e50d72d, 2 Oct, ADR-003); mock webhooks with `webhook_inbox` (7e58a48, 3 Oct). After 9 Oct the same architecture was extended, not replaced: Razorpay test mode through the existing adapter contract (a3504b5, 27 Oct), then M2/M4/M5/M6/M7 (12–20 Nov). The baseline comparison (`evaluation/`, ADR-032) measures option 1 against option 3: a naive version of option 1 was wrong in 7 of 7 failure workloads, a careful version in 2 (out-of-order and lost events), option 3 in none.
 - **Revisit trigger:** a requirement the event model can't express (for example usage-based billing with millions of events per user), or a need to run several instances that the in-memory projection can't support.
 ---
 
@@ -295,7 +296,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Options considered:** (1) trust the provider amount and let reconciliation report mismatches later; (2) **refuse at the source**.
 - **Decision & rationale:** option 2: the purchase must name one of our orders, owned by the same user, with paid amount ≥ total and the order's currency; otherwise `UNDERPAID` / `NO_MATCHING_ORDER`, nothing granted; a later full payment completes the order.
 - **Consequences & trade-offs:** + no access without full payment; − a genuine partial payment is refused and escalated instead of granted.
-- **Evidence & validation:** `test/verify-m4.js` (0.01, JPY, no order, another user's order); `evaluation/` S4 (baseline 10 wrongly granted per run, LEARNX 0).
+- **Evidence & validation:** `test/verify-m4.js` (0.01, JPY, no order, another user's order); `evaluation/` S4 (naive baseline 10 wrongly granted per run; careful baseline, which also checks amount and currency, and LEARNX 0).
 - **Revisit trigger:** multi-currency pricing or instalment payments.
 
 ## ADR-024 — Reconciliation escalates refused replays as PAYMENT_REFUSED
@@ -377,3 +378,14 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Consequences & trade-offs:** + the submitted code is the code that was tested end to end; − 10 or more simultaneous seat assignments can freeze the app until it is restarted. The evaluation runs S6 with 6 parallel assignments (below the pool size) and reports the freeze separately.
 - **Evidence & validation:** the freeze observed in the first S6 run; `evaluation/README.md` ("Known defect"); prototype results above. Tracked as a GitHub issue (report §9, task 1).
 - **Revisit trigger:** organizations assigning seats in bulk, or any other code path that holds a pooled connection while waiting on a lock.
+
+## ADR-032 — Evaluate against two baselines: naive and careful
+
+- **Date, status & scope:** 2026-11-21. Accepted. Methodology (report §4–§5); `evaluation/`.
+- **Context & decision drivers:** the guide asks for a baseline comparison with declared workloads and metrics. The first evaluation compared LEARNX with one naive baseline (webhooks flip access flags, no protections). Reviewing it, the author judged it too easy to win: its error counts follow directly from the inputs, and a sensible developer would add deduplication and locks anyway. A comparison that only beats a strawman is weak evidence.
+- **Options considered:** (1) keep the naive baseline only; (2) replace it with a stronger one; (3) **keep the naive baseline and add a careful one** that follows the usual webhook advice (deduplicate by payment id, match amount and currency to the order, race-safe quota/seat/approval updates) but has no event history, retry or reconciliation; (4) compare with an existing product (Lago, Kill Bill): heavy to run, and not a like-for-like design.
+- **Decision & rationale:** option 3. The naive baseline shows what goes wrong with no care at all; the careful one isolates what LEARNX's design adds beyond ordinary care (judgment). The measurement: the careful baseline fails only S2 (refund before purchase) and S3 (lost webhooks).
+- **Consequences & trade-offs:** + the claim is narrower and defensible ("ordering and recovery", not "7 of 7"); − the careful baseline's S2 result depends on its choice to ignore an unknown refund (stated in the report); the workloads stay small and deterministic, and webhooks skip the HTTP route (covered by the test suites instead).
+- **Evidence & validation:** `evaluation/baseline.js`, `evaluation/baseline-careful.js`, `evaluation/run-evaluation.js`; `evaluation/results/` (seed 42, 5 runs).
+- **Revisit trigger:** a new failure mode in production that the careful baseline would also handle (then LEARNX's design needs a new justification), or a move to load testing.
+

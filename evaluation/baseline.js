@@ -80,4 +80,7 @@ async function ordersFor(intentId) {
   return (await pool.query(`SELECT count(*)::int n FROM ${SCHEMA}.orders WHERE intent_id=$1`, [intentId])).rows[0].n;
 }
 
-module.exports = { setup, teardown, handleWebhook, hasAccess, revenue, consumeQuota, assignSeat, seatsInUse, approve, execute, ordersFor };
+// The naive design keeps no orders: nothing to record at checkout.
+async function createOrder() {}
+
+module.exports = { setup, teardown, createOrder, handleWebhook, hasAccess, revenue, consumeQuota, assignSeat, seatsInUse, approve, execute, ordersFor };

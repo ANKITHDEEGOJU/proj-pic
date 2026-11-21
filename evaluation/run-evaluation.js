@@ -1,8 +1,10 @@
 'use strict';
-// Baseline-versus-LEARNX evaluation. Runs the same workloads against
-//   - BASELINE (evaluation/baseline.js): webhooks flip access flags directly, read-then-write limits
-//   - LEARNX   (the real code: webhook inbox + processor, ledger, projection, reconciliation,
-//               quotas, seats, agent purchase service)
+// Baselines-versus-LEARNX evaluation. Runs the same workloads against
+//   - NAIVE baseline   (evaluation/baseline.js): webhooks flip access flags directly, read-then-write limits
+//   - CAREFUL baseline (evaluation/baseline-careful.js): deduplication by payment id, order/amount/
+//                      currency check, race-safe limits; no event history, retry or reconciliation
+//   - LEARNX           (the real code: webhook inbox + processor, ledger, projection, reconciliation,
+//                      quotas, seats, agent purchase service)
 // and writes raw results, a CSV summary, SVG charts and RESULTS.md to evaluation/results/.
 //
 //   node evaluation/run-evaluation.js [--runs 5] [--size 10] [--seed 42]
@@ -29,7 +31,8 @@ const { createOrder } = require('../src/services/orders');
 const quotas = require('../src/services/quotas');
 const seats = require('../src/services/seats');
 const agent = require('../src/services/agentPurchase');
-const baseline = require('./baseline');
+const BASES = { naive: require('./baseline'), careful: require('./baseline-careful') };
+const SIDES = [['naive', 'Naive baseline'], ['careful', 'Careful baseline'], ['system', 'LEARNX']];
 
 // ---- arguments, seeded randomness ----------------------------------------------------------------
 const arg = (name, dflt) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? Number(process.argv[i + 1]) : dflt; };
@@ -72,9 +75,16 @@ async function newOrder(user, cents = course.priceCents) {
   const c = await pool.connect();
   try {
     return await createOrder(c, { userId: user.id, provider: PROVIDER, subtotalCents: cents, finalCents: cents,
-      lines: [{ itemType: 'COURSE', itemId: course.id, unitPriceCents: cents, paidCents: cents }] });
+      lines: [{ itemType: 'COURSE', itemId: course.id, unitPriceCents: cents, paidCents: cents }] })
+      .then(async (orderId) => {
+        // The baselines see the same checkout (the careful one stores it to match payments against).
+        for (const b of Object.values(BASES)) await b.createOrder({ orderRef: orderId, userId: user.id, productId: course.id, amountCents: cents, currency: 'USD' });
+        return orderId;
+      });
   } finally { c.release(); }
 }
+// The webhook as a baseline receives it.
+const ev = (x, type) => ({ type, paymentId: x.p.id, orderRef: x.p.notes.orderId, userId: x.u.id, productId: course.id, amountCents: x.p.amount, currency: x.p.currency });
 // A captured payment as the provider sees it (registered at the provider for reconciliation).
 function payment(orderId, user, amountMinor, currency = 'USD', productId = course.id) {
   const p = { id: rid('pay'), entity: 'payment', amount: amountMinor, currency, status: 'captured', captured: true, amount_refunded: 0,
@@ -107,8 +117,9 @@ const pct = (xs, q) => { const a = [...xs].sort((x, y) => x - y); return a.lengt
 const ms = (t0) => Number(process.hrtime.bigint() - t0) / 1e6;
 
 // ---- scenarios -------------------------------------------------------------------------------------
-// Each returns { baseline: {...metrics}, system: {...metrics} } for one run; `errors` is the number
-// of incorrect outcomes (what the charts compare).
+// Each returns { naive: {...}, careful: {...}, system: {...} } for one run; `errors` is the number of
+// incorrect outcomes (what the charts compare). The baselines run after LEARNX on the same inputs.
+const eachBase = async (fn) => { const out = {}; for (const [k, b] of Object.entries(BASES)) out[k] = await fn(b); return out; };
 const SCENARIOS = [
   { id: 'S1', name: 'Duplicate webhook delivery (each payment delivered 3x, shuffled, concurrent)', expected: 'one purchase and one charge per payment',
     async run() {
@@ -116,15 +127,15 @@ const SCENARIOS = [
       const pays = [];
       for (const u of users) pays.push({ u, p: payment(await newOrder(u), u, course.priceCents) });
       const copies = shuffle(pays.flatMap((x) => [x, x, x]));
-      await Promise.all(copies.map((x) => deliver(captured(x.p))));
-      const sys = await ledgerPurchases(pays.map((x) => x.p.id));
-      await Promise.all(copies.map((x) => baseline.handleWebhook({ type: 'purchase', paymentId: x.p.id, userId: x.u.id, productId: course.id, amountCents: x.p.amount })));
-      const base = await baseline.revenue(pays.map((x) => x.p.id));
       const want = SIZE * course.priceCents;
-      return {
-        baseline: { recordedPurchases: base.n, recordedRevenueCents: base.cents, revenueErrorPct: Math.round(((base.cents - want) / want) * 1000) / 10, errors: base.n - SIZE },
-        system: { recordedPurchases: sys.n, recordedRevenueCents: sys.cents, revenueErrorPct: Math.round(((sys.cents - want) / want) * 1000) / 10, errors: sys.n - SIZE },
-      };
+      const m = (r) => ({ recordedPurchases: r.n, recordedRevenueCents: r.cents, revenueErrorPct: Math.round(((r.cents - want) / want) * 1000) / 10, errors: r.n - SIZE });
+      await Promise.all(copies.map((x) => deliver(captured(x.p))));
+      const system = m(await ledgerPurchases(pays.map((x) => x.p.id)));
+      const bases = await eachBase(async (b) => {
+        await Promise.all(copies.map((x) => b.handleWebhook(ev(x, 'purchase'))));
+        return m(await b.revenue(pays.map((x) => x.p.id)));
+      });
+      return { ...bases, system };
     } },
   { id: 'S2', name: 'Reordered events (refund arrives before its purchase)', expected: 'no access after a refund',
     async run() {
@@ -136,11 +147,15 @@ const SCENARIOS = [
       for (const x of shuffle(items)) await deliver(captured(x.p));
       await pool.query("UPDATE webhook_inbox SET next_retry_at = now() WHERE id = ANY($1)", [early.map((e) => e.id)]);
       await retryDueWebhooks({ ledger: engine.ledger, ids: early.map((e) => e.id), log: quiet }); // the background retry
-      for (const x of items) await baseline.handleWebhook({ type: 'refund', userId: x.u.id, productId: course.id });
-      for (const x of items) await baseline.handleWebhook({ type: 'purchase', paymentId: x.p.id, userId: x.u.id, productId: course.id, amountCents: x.p.amount });
-      let sysWrong = 0, baseWrong = 0;
-      for (const x of items) { if (allowed(x.u)) sysWrong++; if (await baseline.hasAccess(x.u.id, course.id)) baseWrong++; }
-      return { baseline: { usersWithAccessAfterRefund: baseWrong, errors: baseWrong }, system: { usersWithAccessAfterRefund: sysWrong, earlyRefundsDeferred: early.filter((e) => e.outcome === 'FAILED').length, errors: sysWrong } };
+      const sysWrong = items.filter((x) => allowed(x.u)).length;
+      const bases = await eachBase(async (b) => {
+        for (const x of items) await b.handleWebhook(ev(x, 'refund'));
+        for (const x of items) await b.handleWebhook(ev(x, 'purchase'));
+        let wrong = 0;
+        for (const x of items) if (await b.hasAccess(x.u.id, course.id)) wrong++;
+        return { usersWithAccessAfterRefund: wrong, errors: wrong };
+      });
+      return { ...bases, system: { usersWithAccessAfterRefund: sysWrong, earlyRefundsDeferred: early.filter((e) => e.outcome === 'FAILED').length, errors: sysWrong } };
     } },
   { id: 'S3', name: 'Lost webhooks (30 % of payment webhooks dropped), then reconciliation', expected: 'every paying user has access after recovery',
     async run() {
@@ -148,20 +163,19 @@ const SCENARIOS = [
       const items = [];
       for (const u of users) items.push({ u, p: payment(await newOrder(u), u, course.priceCents) });
       const dropped = new Set(shuffle(items).slice(0, Math.round(SIZE * 0.3)).map((x) => x.p.id));
-      for (const x of items) if (!dropped.has(x.p.id)) {
-        await deliver(captured(x.p));
-        await baseline.handleWebhook({ type: 'purchase', paymentId: x.p.id, userId: x.u.id, productId: course.id, amountCents: x.p.amount });
-      }
+      const delivered = items.filter((x) => !dropped.has(x.p.id));
+      for (const x of delivered) await deliver(captured(x.p));
       const missingBefore = items.filter((x) => !allowed(x.u)).length;
       const recon = new Reconciler({ ledger: engine.ledger, adapters: { [PROVIDER]: fake }, graceSeconds: 0, stuckMinutes: 15, lookbackDays: 1, log: quiet });
       const run = await recon.run({ trigger: 'eval' });
       const missingAfter = items.filter((x) => !allowed(x.u)).length;
-      let baseMissing = 0;
-      for (const x of items) if (!(await baseline.hasAccess(x.u.id, course.id))) baseMissing++;
-      return {
-        baseline: { dropped: dropped.size, payingUsersWithoutAccess: baseMissing, errors: baseMissing },
-        system: { dropped: dropped.size, withoutAccessBeforeRecon: missingBefore, payingUsersWithoutAccess: missingAfter, reconFixed: (run.fixed || []).filter((f) => f.kind === 'MISSING_PURCHASE').length, errors: missingAfter },
-      };
+      const bases = await eachBase(async (b) => {
+        for (const x of delivered) await b.handleWebhook(ev(x, 'purchase'));
+        let missing = 0;
+        for (const x of items) if (!(await b.hasAccess(x.u.id, course.id))) missing++;
+        return { dropped: dropped.size, payingUsersWithoutAccess: missing, errors: missing };
+      });
+      return { ...bases, system: { dropped: dropped.size, withoutAccessBeforeRecon: missingBefore, payingUsersWithoutAccess: missingAfter, reconFixed: (run.fixed || []).filter((f) => f.kind === 'MISSING_PURCHASE').length, errors: missingAfter } };
     } },
   { id: 'S4', name: 'Tampered payments (half pay 0.01, half pay the right number in JPY)', expected: 'no access for an underpayment',
     async run() {
@@ -171,38 +185,46 @@ const SCENARIOS = [
         const p = i % 2 === 0 ? payment(await newOrder(u), u, 1) : payment(await newOrder(u), u, course.priceCents, 'JPY');
         items.push({ u, p });
       }
-      for (const x of items) {
-        await deliver(captured(x.p));
-        await baseline.handleWebhook({ type: 'purchase', paymentId: x.p.id, userId: x.u.id, productId: course.id, amountCents: x.p.amount });
-      }
-      let sysWrong = 0, baseWrong = 0;
-      for (const x of items) { if (allowed(x.u)) sysWrong++; if (await baseline.hasAccess(x.u.id, course.id)) baseWrong++; }
-      return { baseline: { wronglyGranted: baseWrong, errors: baseWrong }, system: { wronglyGranted: sysWrong, errors: sysWrong } };
+      for (const x of items) await deliver(captured(x.p));
+      const sysWrong = items.filter((x) => allowed(x.u)).length;
+      const bases = await eachBase(async (b) => {
+        for (const x of items) await b.handleWebhook(ev(x, 'purchase'));
+        let wrong = 0;
+        for (const x of items) if (await b.hasAccess(x.u.id, course.id)) wrong++;
+        return { wronglyGranted: wrong, errors: wrong };
+      });
+      return { ...bases, system: { wronglyGranted: sysWrong, errors: sysWrong } };
     } },
   { id: 'S5', name: 'Quota under concurrency (50 parallel requests, limit 10)', expected: 'exactly 10 accepted',
     async run() {
       const u = await newUser('quota');
       const scope = `eval:${randomUUID()}`;
       const sys = await Promise.all(Array.from({ length: 50 }, () => quotas.consume({ requestKey: `eval:${randomUUID()}`, quota: { scopeKey: scope, limit: 10 }, feature: 'EVAL', userId: u.id })));
-      const base = await Promise.all(Array.from({ length: 50 }, () => baseline.consumeQuota(scope, 10)));
-      const s = sys.filter((r) => r.ok).length, b = base.filter(Boolean).length;
-      return { baseline: { accepted: b, errors: Math.abs(b - 10) }, system: { accepted: s, errors: Math.abs(s - 10) } };
+      const s = sys.filter((r) => r.ok).length;
+      const bases = await eachBase(async (b) => {
+        const n = (await Promise.all(Array.from({ length: 50 }, () => b.consumeQuota(scope, 10)))).filter(Boolean).length;
+        return { accepted: n, errors: Math.abs(n - 10) };
+      });
+      return { ...bases, system: { accepted: s, errors: Math.abs(s - 10) } };
     } },
   { id: 'S6', name: 'Last seat race (1-seat pack, 6 parallel assignments)', expected: 'exactly 1 seat in use',
     async run() {
       const owner = await newUser('seatowner');
       // 6, not 10: with 10 simultaneous assignments the app ran out of database connections
-      // and freezes (known defect, see evaluation/README.md). 6 stays below the pool of 10.
+      // and froze (known defect, see evaluation/README.md). 6 stays below the pool of 10.
       const members = await Promise.all(Array.from({ length: 6 }, () => newUser('member')));
       const pack = await seats.createSeatPackOrder({ userId: owner.id, orgName: `Eval Org ${randomUUID().slice(0, 4)}`, course, seats: 1, provider: PROVIDER });
       orgIds.push(pack.org.id);
       await deliver(captured(payment(pack.orderId, owner, course.priceCents)));
       await Promise.all(members.map((m) => seats.assignSeat({ ledger: engine.ledger, poolId: pack.pool.id, email: m.email, actor: `user:${owner.id}` }).catch(() => null)));
       const sysInUse = (await seats.activeSeats(pack.pool.id)).length;
-      const poolKey = `eval-pool-${randomUUID()}`;
-      await Promise.all(members.map((m) => baseline.assignSeat(poolKey, 1, m.email)));
-      const baseInUse = await baseline.seatsInUse(poolKey);
-      return { baseline: { seatsInUse: baseInUse, errors: Math.max(0, baseInUse - 1) }, system: { seatsInUse: sysInUse, errors: Math.max(0, sysInUse - 1) } };
+      const bases = await eachBase(async (b) => {
+        const poolKey = `eval-pool-${randomUUID()}`;
+        await Promise.all(members.map((m) => b.assignSeat(poolKey, 1, m.email)));
+        const n = await b.seatsInUse(poolKey);
+        return { seatsInUse: n, errors: Math.max(0, n - 1) };
+      });
+      return { ...bases, system: { seatsInUse: sysInUse, errors: Math.max(0, sysInUse - 1) } };
     } },
   { id: 'S7', name: 'Approval replay (one approval executed 5x in parallel)', expected: 'exactly 1 order',
     async run() {
@@ -212,26 +234,28 @@ const SCENARIOS = [
       const { token } = await agent.approve({ intentId: i.id, userId: u.id, expectAmountCents: i.amount_cents });
       const startPayment = async () => ({ status: 'CHECKOUT', redirectUrl: 'http://eval.test/pay' });
       const sys = await Promise.all(Array.from({ length: 5 }, () => agent.execute({ intentId: i.id, token, userId: u.id, catalog, decisions, startPayment }).then(() => 1, () => 0)));
-      const key = `eval-intent-${randomUUID()}`;
-      await baseline.approve(key);
-      const base = await Promise.all(Array.from({ length: 5 }, () => baseline.execute(key)));
-      const sOrders = sys.reduce((a, b) => a + b, 0), bOrders = await baseline.ordersFor(key);
-      void base;
-      return { baseline: { ordersCreated: bOrders, errors: Math.max(0, bOrders - 1) }, system: { ordersCreated: sOrders, errors: Math.max(0, sOrders - 1) } };
+      const sOrders = sys.reduce((a, b) => a + b, 0);
+      const bases = await eachBase(async (b) => {
+        const key = `eval-intent-${randomUUID()}`;
+        await b.approve(key);
+        await Promise.all(Array.from({ length: 5 }, () => b.execute(key)));
+        const n = await b.ordersFor(key);
+        return { ordersCreated: n, errors: Math.max(0, n - 1) };
+      });
+      return { ...bases, system: { ordersCreated: sOrders, errors: Math.max(0, sOrders - 1) } };
     } },
   { id: 'S8', name: 'Cost of the safety: time to process one payment webhook', expected: 'informational (ms)',
     async run() {
       const users = await Promise.all(Array.from({ length: SIZE }, () => newUser('latency')));
-      const sysT = [], baseT = [];
+      const t = { naive: [], careful: [], system: [] };
       for (const u of users) {
-        const p = payment(await newOrder(u), u, course.priceCents);
-        let t0 = process.hrtime.bigint(); await deliver(captured(p)); sysT.push(ms(t0));
-        t0 = process.hrtime.bigint();
-        await baseline.handleWebhook({ type: 'purchase', paymentId: p.id, userId: u.id, productId: course.id, amountCents: p.amount });
-        baseT.push(ms(t0));
+        const x = { u, p: payment(await newOrder(u), u, course.priceCents) };
+        let t0 = process.hrtime.bigint(); await deliver(captured(x.p)); t.system.push(ms(t0));
+        for (const [k, b] of Object.entries(BASES)) { t0 = process.hrtime.bigint(); await b.handleWebhook(ev(x, 'purchase')); t[k].push(ms(t0)); }
       }
-      const r = (x) => Math.round(x * 10) / 10;
-      return { baseline: { p50ms: r(pct(baseT, 0.5)), p95ms: r(pct(baseT, 0.95)), errors: 0 }, system: { p50ms: r(pct(sysT, 0.5)), p95ms: r(pct(sysT, 0.95)), errors: 0 } };
+      const r = (v) => Math.round(v * 10) / 10;
+      const m = (xs) => ({ p50ms: r(pct(xs, 0.5)), p95ms: r(pct(xs, 0.95)), errors: 0 });
+      return { naive: m(t.naive), careful: m(t.careful), system: m(t.system) };
     } },
 ];
 
@@ -275,7 +299,7 @@ async function cleanup() {
   await pool.query('DELETE FROM recon_issues WHERE provider=$1', [PROVIDER]);
   await pool.query("DELETE FROM recon_runs WHERE trigger='eval'");
   await pool.query('DELETE FROM webhook_inbox WHERE provider=$1', [PROVIDER]);
-  await baseline.teardown();
+  for (const b of Object.values(BASES)) await b.teardown();
 }
 
 (async () => {
@@ -284,18 +308,17 @@ async function cleanup() {
   await engine.projection.rebuildFromLedger();
   processor = new WebhookProcessor({ ledger: engine.ledger });
   course = engine.catalog.list().find((p) => (p.type || 'COURSE') === 'COURSE');
-  await baseline.setup();
+  for (const b of Object.values(BASES)) await b.setup();
 
   const results = {};
   for (const s of SCENARIOS) {
-    results[s.id] = { name: s.name, expected: s.expected, baseline: [], system: [] };
+    results[s.id] = { name: s.name, expected: s.expected, naive: [], careful: [], system: [] };
     for (let r = 0; r < RUNS; r++) {
       const out = await s.run();
-      results[s.id].baseline.push(out.baseline);
-      results[s.id].system.push(out.system);
+      for (const [k] of SIDES) results[s.id][k].push(out[k]);
     }
     const e = (side) => mean(results[s.id][side].map((x) => x.errors));
-    console.log(`${s.id} ${s.name}: baseline errors/run ${e('baseline')}, LEARNX errors/run ${e('system')}`);
+    console.log(`${s.id} ${s.name}: errors/run naive ${e('naive')}, careful ${e('careful')}, LEARNX ${e('system')}`);
   }
 
   const sha = (() => { try { return execSync('git rev-parse --short HEAD', { cwd: path.join(__dirname, '..') }).toString().trim(); } catch { return 'unknown'; } })();
@@ -304,15 +327,17 @@ async function cleanup() {
   const meta = { date: new Date().toISOString(), commit: sha, uncommittedSourceChanges: dirty, runs: RUNS, size: SIZE, seed: SEED, node: process.version, postgres: pg,
     os: `${os.type()} ${os.release()}`, cpu: os.cpus()[0]?.model, cpus: os.cpus().length, course: { id: course.id, priceCents: course.priceCents } };
 
-  // Summary: every numeric metric, mean over runs, both sides.
+  // Summary: every numeric metric, mean (min-max) over runs, per side.
   const rows = [];
-  for (const [id, s] of Object.entries(results)) {
-    const keys = [...new Set([...s.baseline, ...s.system].flatMap((m) => Object.keys(m)))];
-    for (const k of keys) {
-      const b = s.baseline.map((m) => m[k]).filter((v) => typeof v === 'number');
-      const y = s.system.map((m) => m[k]).filter((v) => typeof v === 'number');
-      rows.push({ scenario: id, metric: k, baseline: b.length ? mean(b) : '', learnx: y.length ? mean(y) : '',
-        baselineMin: b.length ? Math.min(...b) : '', baselineMax: b.length ? Math.max(...b) : '', learnxMin: y.length ? Math.min(...y) : '', learnxMax: y.length ? Math.max(...y) : '' });
+  for (const [id, sc] of Object.entries(results)) {
+    const keys = [...new Set(SIDES.flatMap(([k]) => sc[k].flatMap((m) => Object.keys(m))))];
+    for (const key of keys) {
+      const row = { scenario: id, metric: key };
+      for (const [k] of SIDES) {
+        const v = sc[k].map((m) => m[key]).filter((x) => typeof x === 'number');
+        row[k] = v.length ? { mean: mean(v), min: Math.min(...v), max: Math.max(...v) } : null;
+      }
+      rows.push(row);
     }
   }
   const dir = path.join(__dirname, 'results');
@@ -320,25 +345,28 @@ async function cleanup() {
   const stamp = meta.date.replace(/[:.]/g, '-');
   fs.writeFileSync(path.join(dir, `raw-${stamp}.json`), JSON.stringify({ meta, results }, null, 2));
   fs.writeFileSync(path.join(dir, 'latest.json'), JSON.stringify({ meta, results }, null, 2));
-  fs.writeFileSync(path.join(dir, 'summary.csv'), ['scenario,metric,baseline_mean,learnx_mean,baseline_min,baseline_max,learnx_min,learnx_max',
-    ...rows.map((r) => [r.scenario, r.metric, r.baseline, r.learnx, r.baselineMin, r.baselineMax, r.learnxMin, r.learnxMax].join(','))].join('\n') + '\n');
+  const c = (x, f) => (x ? x[f] : '');
+  fs.writeFileSync(path.join(dir, 'summary.csv'), ['scenario,metric,' + SIDES.map(([k]) => `${k}_mean,${k}_min,${k}_max`).join(','),
+    ...rows.map((r) => [r.scenario, r.metric, ...SIDES.flatMap(([k]) => [c(r[k], 'mean'), c(r[k], 'min'), c(r[k], 'max')])].join(','))].join('\n') + '\n');
 
   const errIds = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
   const errMean = (id, side) => mean(results[id][side].map((x) => x.errors));
   fs.writeFileSync(path.join(dir, 'chart-incorrect-outcomes.svg'), svgBars(`Incorrect outcomes per run (mean of ${RUNS} runs, lower is better)`, errIds,
-    [{ name: 'Baseline', values: errIds.map((id) => errMean(id, 'baseline')) }, { name: 'LEARNX', values: errIds.map((id) => errMean(id, 'system')) }], 'incorrect outcomes'));
+    SIDES.map(([k, label]) => ({ name: label, values: errIds.map((id) => errMean(id, k)) })), 'incorrect outcomes'));
   const lat = (side, k) => mean(results.S8[side].map((x) => x[k]));
   fs.writeFileSync(path.join(dir, 'chart-webhook-latency.svg'), svgBars('Time to process one payment webhook (ms)', ['p50', 'p95'],
-    [{ name: 'Baseline', values: [lat('baseline', 'p50ms'), lat('baseline', 'p95ms')] }, { name: 'LEARNX', values: [lat('system', 'p50ms'), lat('system', 'p95ms')] }], 'milliseconds'));
+    SIDES.map(([k, label]) => ({ name: label, values: [lat(k, 'p50ms'), lat(k, 'p95ms')] })), 'milliseconds'));
 
+  const fmt = (x) => (x ? (x.min === x.max ? `${x.mean}` : `${x.mean} (${x.min}–${x.max})`) : '—');
   const md = [`# Evaluation results`, ``,
     `Generated by \`node evaluation/run-evaluation.js --runs ${RUNS} --size ${SIZE} --seed ${SEED}\` on ${meta.date}`,
     `(commit \`${sha}\`${dirty ? ' plus uncommitted source changes' : ''}, Node ${meta.node}, PostgreSQL ${pg}, ${meta.os}, ${meta.cpus}× ${meta.cpu}). Raw data: \`latest.json\`, \`raw-${stamp}.json\`; table: \`summary.csv\`.`, ``,
     `![Incorrect outcomes](chart-incorrect-outcomes.svg)`, ``, `![Webhook latency](chart-webhook-latency.svg)`, ``,
-    `| Scenario | Expected | Incorrect outcomes per run: baseline | LEARNX |`, `|---|---|---|---|`,
-    ...errIds.map((id) => `| ${id}: ${results[id].name} | ${results[id].expected} | ${errMean(id, 'baseline')} | ${errMean(id, 'system')} |`), ``,
-    `| Metric | Baseline (mean, min–max) | LEARNX (mean, min–max) |`, `|---|---|---|`,
-    ...rows.filter((r) => r.metric !== 'errors').map((r) => `| ${r.scenario} ${r.metric} | ${r.baseline} (${r.baselineMin}–${r.baselineMax}) | ${r.learnx} (${r.learnxMin}–${r.learnxMax}) |`), ``,
+    `| Scenario | Expected | Incorrect outcomes per run: naive | careful | LEARNX |`, `|---|---|---|---|---|`,
+    ...errIds.map((id) => `| ${id}: ${results[id].name} | ${results[id].expected} | ${errMean(id, 'naive')} | ${errMean(id, 'careful')} | ${errMean(id, 'system')} |`), ``,
+    `| Metric | Naive | Careful | LEARNX |`, `|---|---|---|---|`,
+    ...rows.filter((r) => r.metric !== 'errors').map((r) => `| ${r.scenario} ${r.metric} | ${fmt(r.naive)} | ${fmt(r.careful)} | ${fmt(r.system)} |`), ``,
+    `A single number means every run gave the same value; otherwise mean (min–max).`, ``,
   ].join('\n');
   fs.writeFileSync(path.join(dir, 'RESULTS.md'), md + '\n');
   console.log(`\nWritten: evaluation/results/RESULTS.md, latest.json, raw-${stamp}.json, summary.csv, 2 charts`);

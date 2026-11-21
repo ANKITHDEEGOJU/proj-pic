@@ -13,8 +13,8 @@
 
 **Problem.** A learning service sells courses, a subscription pass, enterprise seat packs and free
 (admin or scholarship) access. Provider events arrive late, twice, out of order or not at all, yet access
-must stay correct through refunds, chargebacks and expiry. An AI agent may buy for the user only with
-explicit, auditable approval.
+must stay correct through refunds, chargebacks and expiry. An AI agent may buy only with explicit,
+auditable approval.
 
 **Solution.** LEARNX (Node.js/Express, PostgreSQL, htmx):
 - access is never stored; it is computed from an append-only event ledger;
@@ -22,11 +22,12 @@ explicit, auditable approval.
   inbox, retries and reconciliation;
 - coupons, seats, stacked pass periods and usage quotas;
 - the assistant (an LLM) only proposes purchases; the user approves with a signed, one-time token
-  pinning item, merchant, amount and coupon.
+  pinning item, amount and coupon.
 
 **What works today.** M1–M8 are implemented and verified: 11 automated suites, a failure-injection run
-(6/6), browser end-to-end runs with Razorpay test cards, and a baseline comparison where the baseline
-was wrong in 7 of 7 failure workloads and LEARNX in none.
+(6/6), browser end-to-end runs with Razorpay test cards, and a comparison with two baselines: a naive
+one was wrong in 7 of 7 failure workloads, a careful one in 2 (out-of-order and lost events), LEARNX
+in none.
 
 **Completion state.** Complete for the approved scope. One known defect (a burst of 10+ simultaneous
 seat assignments can freeze the app). Not implemented: automatic recurring billing and multiple app
@@ -106,7 +107,7 @@ verifiable, single-use user authorisation.
 
 | Approach | Description | Why it was or wasn't selected |
 |---|---|---|
-| A. Access flags (CRUD) | Each webhook updates a `has_access` flag and a payments table | Simple and fast, but no history, and breaks under duplicates, reordering and races. **Used as the working baseline** (§4). |
+| A. Access flags (CRUD) | Each webhook updates a `has_access` flag and a payments table | Simple and fast, but no history; breaks under duplicates, reordering and races unless each case is guarded by hand. **Used as the two working baselines** (§4). |
 | B. Payment orchestration product + flags | Hyperswitch or similar in front of the providers | Provider-neutral, but heavy to run, and still needs custom entitlements and the same idempotency work |
 | **C. Own adapter contract + webhook inbox + append-only ledger + projection** | **Selected** | Meets M1–M3 directly, keeps the domain provider- and agent-free, and the database can enforce idempotency (unique ids, one reversal, append-only triggers) |
 
@@ -126,7 +127,12 @@ verifiable, single-use user authorisation.
 PostgreSQL 17 is the database. Everything else is our own code: domain, payments, services, mock provider,
 tests, evaluation.
 
-**Working baseline.** Approach A, implemented in `evaluation/baseline.js` on the same PostgreSQL server.
+**Working baselines.** Two versions of approach A, on the same PostgreSQL server:
+- **Naive** (`evaluation/baseline.js`): each webhook flips the flag and records revenue; limits are "read, then write".
+- **Careful** (`evaluation/baseline-careful.js`): approach A plus the usual webhook advice: one row per payment id (duplicates ignored), payment must match the order's amount and currency, race-safe quota, seat and approval updates. It still has no event history, no handling of a refund that arrives before its payment, and no reconciliation.
+
+The careful baseline keeps the comparison honest: it shows which failures ordinary care already
+prevents, and which ones need LEARNX's design.
 
 ## 3. Architecture & implementation
 
@@ -153,7 +159,7 @@ receive Razorpay webhooks locally).
 - **Provider to app:** signed webhooks; a payment grants nothing unless it matches an order of that user in amount and currency.
 - **Model to app:** the model is untrusted. It has no approve tool, the server sets prices, and the approval token never reaches the model.
 
-**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-031):
+**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-032):
 
 | Topic | ADRs |
 |---|---|
@@ -163,17 +169,18 @@ receive Razorpay webhooks locally).
 | Agent purchases | ADR-012, 013, 027, 028 |
 | Payment safety | ADR-022, 023 |
 | Security | ADR-025, 026, 029 |
+| Evaluation method | ADR-000 (methodology), ADR-032 (two baselines) |
 
 ## 4. Methodology & experiment setup
 
 **Evaluation questions:**
 1. Does each acceptance criterion hold (automated suites)?
 2. Under the failure modes the brief names (duplicate, late or reordered, lost events) and under concurrency
-   and tampering, how many incorrect outcomes does LEARNX produce compared with the baseline?
+   and tampering, how many incorrect outcomes does LEARNX produce compared with the two baselines?
 3. What does the extra safety cost in processing time?
 4. Do the complete user workflows work in a browser against a real sandbox provider?
 
-**Workloads** (`evaluation/run-evaluation.js`): the same workload is run against the baseline and LEARNX.
+**Workloads** (`evaluation/run-evaluation.js`): the same workload is run against both baselines and LEARNX.
 
 | ID | Workload | Correct outcome | Metric (incorrect outcomes per run) |
 |---|---|---|---|
@@ -213,23 +220,35 @@ part of the baseline comparison, because purchases are decided by server rules, 
 
 ![Incorrect outcomes per run](../evaluation/results/chart-incorrect-outcomes.svg)
 
-| Workload | Baseline: incorrect outcomes per run (mean of 5) | LEARNX | Detail |
-|---|---|---|---|
-| S1 duplicates | **20** | **0** | Baseline recorded 30 purchases and 600.00 USD instead of 10 and 200.00 (+200 %); LEARNX recorded exactly 10 and 200.00 |
-| S2 reordered | **10** | **0** | Baseline: all 10 refunded users kept access; LEARNX deferred the 10 early refunds (HTTP 503 / retry) and applied them after the purchase |
-| S3 lost webhooks | **3** | **0** | 3 of 10 payment webhooks dropped; reconciliation repaired all 3 (`MISSING_PURCHASE`); the baseline cannot recover |
-| S4 tampered | **10** | **0** | Baseline granted all; LEARNX marked the orders `UNDERPAID` (amount or currency) |
-| S5 quota race | **40** | **0** | Baseline accepted 50 of 50; LEARNX exactly 10 |
-| S6 seat race | **5** | **0** | Baseline put 6 members in a 1-seat pack; LEARNX exactly 1 |
-| S7 approval replay | **4** | **0** | Baseline created 5 orders from one approval; LEARNX exactly 1 |
+| Workload | Naive | Careful | LEARNX | Detail |
+|---|---|---|---|---|
+| S1 duplicates | 20 | 0 | 0 | Naive recorded 30 purchases and 600.00 USD instead of 10 and 200.00 (+200 %); careful and LEARNX exactly 10 and 200.00 |
+| S2 reordered | 10 | **10** | **0** | Both baselines: all 10 refunded users kept access (the careful one ignores a refund for a payment it hasn't seen yet). LEARNX answered the early refunds "retry later" (HTTP 503) and applied them after the purchase |
+| S3 lost webhooks | 3 | **3** | **0** | 3 of 10 payment webhooks dropped; LEARNX's reconciliation repaired all 3 (`MISSING_PURCHASE`); neither baseline notices |
+| S4 tampered | 10 | 0 | 0 | Naive granted all; careful and LEARNX refused (amount or currency mismatch; LEARNX marks `UNDERPAID`) |
+| S5 quota race | 40 | 0 | 0 | Naive accepted 50 of 50; careful and LEARNX exactly 10 |
+| S6 seat race | 5 | 0 | 0 | Naive put 6 members in a 1-seat pack; careful and LEARNX exactly 1 |
+| S7 approval replay | 4 | 0 | 0 | Naive created 5 orders from one approval; careful and LEARNX exactly 1 |
 
-Results were identical in all 5 repetitions (min = max for every count). The full table is in
-`evaluation/results/RESULTS.md` and `summary.csv`.
+Incorrect outcomes per run, mean of 5 runs. Full table: `evaluation/results/RESULTS.md` and `summary.csv`.
+
+**What this shows.** Duplicates, tampered amounts and races (S1, S4–S7) are handled by ordinary care,
+so they don't by themselves justify LEARNX's design. What the careful baseline can't do is handle
+**out-of-order events (S2)** and **lost events (S3)**: that needs somewhere to keep an event that can't be
+applied yet (the inbox and retry worker) and a way to compare with the provider (reconciliation). LEARNX
+also keeps the full event history behind every access decision, which this evaluation doesn't measure.
+
+**Limits of this evaluation.**
+- **The counts follow from the inputs** (S1's 20 = 10 payments × 2 extra copies). They show whether a design handles a failure, not how often it happens in production.
+- **Runs are deterministic:** every count was identical in all 5 runs; only the timings vary.
+- **S2 depends on a choice:** a baseline that answered "retry later" and relied on the provider resending would pass S2; that is LEARNX's mechanism.
+- **Simulated provider, no HTTP:** webhooks go straight to the inbox and processor. Signature checks and the HTTP route are covered by `npm run verify:failures` (both servers, signed webhooks), not here.
+- **Small:** 10 users per workload; not a load test.
 
 ![Webhook processing time](../evaluation/results/chart-webhook-latency.svg)
 
-**Cost (S8).** Processing one payment webhook took **p50 4.6 ms / p95 6.4 ms** in LEARNX versus
-**0.7 / 1.2 ms** in the baseline. The cost is the inbox write, order checks, per-line ledger events and
+**Cost (S8).** Processing one payment webhook took **p50 5.0 ms / p95 7.6 ms** in LEARNX versus
+**0.8 / 1.4 ms** (naive) and **0.7 / 0.9 ms** (careful). The cost is the inbox write, order checks, per-line ledger events and
 projection update. That is negligible next to provider latency (Razorpay refund confirmations arrived after
 3–33 s in the browser runs).
 
@@ -336,7 +355,7 @@ How AI-assisted work was checked:
 2. Features were tested end to end in the browser against Razorpay test mode and the mock.
 3. Independent read-only review passes (security; all changes) were run. Their findings were verified live
    before fixing.
-4. The baseline evaluation (§5) was added to measure correctness rather than assume it.
+4. The baseline evaluation (§5) was added to measure correctness rather than assume it, and a second, careful baseline was added after the first comparison was judged too easy to win.
 
 The text of the three course guides (`content/*.md`) was drafted with AI assistance and reviewed by the
 author. Inside the product, the LEARNX Assistant uses an LLM at runtime (Groq `openai/gpt-oss-120b`). That is

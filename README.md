@@ -89,7 +89,7 @@ Run **one** app instance at a time. If `npm start` fails with `EADDRINUSE` (port
 | Do this | Expected |
 |---|---|
 | `npm run verify` | 11 lines ending in `… CHECKS PASSED`, exit code 0 |
-| `node evaluation/run-evaluation.js` | Prints one line per workload, e.g. `S1 … baseline errors/run 20, LEARNX errors/run 0`, and writes `evaluation/results/RESULTS.md` |
+| `node evaluation/run-evaluation.js` | Prints one line per workload, e.g. `S2 … errors/run naive 10, careful 10, LEARNX 0`, and writes `evaluation/results/RESULTS.md` |
 | Register, add **Intro to SQL** to the cart, checkout with **Mock**, press **Pay** | Back on Courses; the card says **Owned**; **Access** shows `Allowed · ACTIVE_PURCHASE`; **Open guide** appears once the admin has published the guides |
 | Click **Refund** on that course | "Refund pending" briefly, then **Refunded**; **Access** shows `Denied · PURCHASE_REFUNDED`; the guide answers "…refunded, so its guide is closed." |
 | On `/agent` type "Buy Intro to SQL with coupon code DEMO" (needs `GROQ_API_KEY` and the DEMO coupon) | A card ~~20.00 USD~~ 19.00 USD with Approve; after Approve and Pay: "Payment received: Intro to SQL is now in your library" |
@@ -406,5 +406,5 @@ test/                  npm run verify suites (verify-*.js) and test fixtures; th
 ```bash
 npm run verify       # ledger, webhook retry / reconciliation, M4 (seats, subscriptions), M5 (quotas), M7 (agent purchases), assistant (fake model), idempotency (one order / grant per click), course guide (access-checked content), agent coupon and security (limits, forged sessions, dev route, error text) checks against Postgres
 npm run verify:failures   # live: mock failure switches end to end (both servers running, settings at the top of the script)
-npm run evaluate          # baseline vs LEARNX on 8 workloads -> evaluation/results/ (see evaluation/README.md)
+npm run evaluate          # two baselines vs LEARNX on 8 workloads -> evaluation/results/ (see evaluation/README.md)
 ```
