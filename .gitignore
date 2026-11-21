@@ -3,3 +3,5 @@ node_modules
 mock-provider/data.json
 guidelines.txt
 guidelines.docx
+# LibreOffice lock files (created while a document is open)
+.~lock.*#
