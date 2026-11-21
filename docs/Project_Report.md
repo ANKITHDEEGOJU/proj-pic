@@ -136,7 +136,7 @@ prevents, and which ones need LEARNX's design.
 
 ## 3. Architecture & implementation
 
-![LEARNX architecture](architecture.svg)
+![LEARNX components and data flow (one app instance; arrows show requests, webhooks and ledger writes)](architecture.svg)
 
 | Component | Responsibility | Interfaces |
 |---|---|---|
@@ -170,6 +170,10 @@ receive Razorpay webhooks locally).
 | Payment safety | ADR-022, 023 |
 | Security | ADR-025, 026, 029, 033 (admin doesn't shop) |
 | Evaluation method | ADR-000 (methodology), ADR-032 (two baselines) |
+
+**Request path.** One purchase from checkout to the access decision; agent purchases end in the same order and webhook path.
+
+![One purchase, end to end: the steps every payment goes through, and the two safety nets for events that can't be applied yet or never arrive](request-flow.svg)
 
 ## 4. Methodology & experiment setup
 
@@ -218,7 +222,8 @@ part of the baseline comparison, because purchases are decided by server rules, 
 
 ## 5. Results, observations & analysis
 
-![Incorrect outcomes per run](../evaluation/results/chart-incorrect-outcomes.svg)
+![Incorrect outcomes per run, mean of 5 runs (lower is better): naive baseline, careful baseline, LEARNX](../evaluation/results/chart-incorrect-outcomes.svg)
+![Time to process one payment webhook, p50 and p95 in milliseconds (S8)](../evaluation/results/chart-webhook-latency.svg)
 
 | Workload | Naive | Careful | LEARNX | Detail |
 |---|---|---|---|---|
@@ -232,11 +237,11 @@ part of the baseline comparison, because purchases are decided by server rules, 
 
 Incorrect outcomes per run, mean of 5 runs. Full table: `evaluation/results/RESULTS.md` and `summary.csv`.
 
-**What this shows.** Duplicates, tampered amounts and races (S1, S4–S7) are handled by ordinary care,
-so they don't by themselves justify LEARNX's design. What the careful baseline can't do is handle
-**out-of-order events (S2)** and **lost events (S3)**: that needs somewhere to keep an event that can't be
-applied yet (the inbox and retry worker) and a way to compare with the provider (reconciliation). LEARNX
-also keeps the full event history behind every access decision, which this evaluation doesn't measure.
+> **What this shows.** Duplicates, tampered amounts and races (S1, S4–S7) are handled by ordinary care,
+> so they don't by themselves justify LEARNX's design. What the careful baseline can't do is handle
+> **out-of-order events (S2)** and **lost events (S3)**: that needs somewhere to keep an event that can't be
+> applied yet (the inbox and retry worker) and a way to compare with the provider (reconciliation). LEARNX
+> also keeps the full event history behind every access decision, which this evaluation doesn't measure.
 
 **Limits of this evaluation.**
 - **The counts follow from the inputs** (S1's 20 = 10 payments × 2 extra copies). They show whether a design handles a failure, not how often it happens in production.
@@ -245,7 +250,6 @@ also keeps the full event history behind every access decision, which this evalu
 - **Simulated provider, no HTTP:** webhooks go straight to the inbox and processor. Signature checks and the HTTP route are covered by `npm run verify:failures` (both servers, signed webhooks), not here.
 - **Small:** 10 users per workload; not a load test.
 
-![Webhook processing time](../evaluation/results/chart-webhook-latency.svg)
 
 **Cost (S8).** Processing one payment webhook took **p50 5.0 ms / p95 7.6 ms** in LEARNX versus
 **0.8 / 1.4 ms** (naive) and **0.7 / 0.9 ms** (careful). The cost is the inbox write, order checks, per-line ledger events and
@@ -274,12 +278,12 @@ issues:
 
 All were fixed and covered by tests.
 
-**Known defect found by the evaluation (not fixed).** The first S6 run used 10 simultaneous seat
-assignments to one pack and froze the app: each waiting assignment holds a database connection, and the
-assignment holding the lock needs more connections than the pool of 10 has left. The seat count stays
-correct, but the app stops responding until restarted. A fix was prototyped and passed (ADR-031) but is
-not in the submitted code; S6 is therefore run with 6 parallel assignments, and the defect is tracked as
-issue 1 (§9).
+> **Known defect found by the evaluation (not fixed).** The first S6 run used 10 simultaneous seat
+> assignments to one pack and froze the app: each waiting assignment holds a database connection, and the
+> assignment holding the lock needs more connections than the pool of 10 has left. The seat count stays
+> correct, but the app stops responding until restarted. A fix was prototyped and passed (ADR-031) but is
+> not in the submitted code; S6 is therefore run with 6 parallel assignments, and the defect is tracked as
+> issue 1 (§9).
 
 **Tests not run:**
 - no load test beyond these workload sizes;
