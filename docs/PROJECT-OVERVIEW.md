@@ -1,8 +1,8 @@
 # LEARNX (streamflix): end-to-end project overview and decision log
 
-*Written 2026-11-20. Covers the whole project from Phase 0 (1 October 2026) to commit `f7dcab5` (20 November), with the work of the most recent sessions described in detail. Decisions ADR-000 to ADR-014 are
-in [Architecture_Decision_Records.md](Architecture_Decision_Records.md); this document summarises them and
-continues the log with ADR-015 to ADR-030. Test evidence is in [E2E-TESTS.md](E2E-TESTS.md).*
+*Written 2026-11-20, updated 2026-11-21. Covers the whole project from Phase 0 (1 October 2026) to the
+final revision. All decisions (ADR-000 to ADR-024) are in [Architecture_Decision_Records.md](Architecture_Decision_Records.md);
+Section 8 lists them in one line each. Test evidence is in [E2E-TESTS.md](E2E-TESTS.md).*
 
 ## Contents
 
@@ -13,7 +13,7 @@ continues the log with ADR-015 to ADR-030. Test evidence is in [E2E-TESTS.md](E2
 5. [Components in detail](#5-components-in-detail)
 6. [Data model](#6-data-model)
 7. [Key flows](#7-key-flows)
-8. [Decision log (ADR-015 onwards)](#8-decision-log-adr-015-onwards)
+8. [Decision log](#8-decision-log)
 9. [Security model](#9-security-model)
 10. [Testing and evidence](#10-testing-and-evidence)
 11. [Configuration](#11-configuration)
@@ -72,7 +72,7 @@ The brief's "done when" is covered end to end in the browser runs recorded in `E
 
 | Area | Before (end of earlier chats) | Now |
 |---|---|---|
-| Agent | Simulated agent with buttons; agent keys and `/agent/api/*` | LEARNX Assistant on Groq (Gemini fallback); purchase cards in the chat with Approve / Pay / Cancel; simulated agent and API removed |
+| Agent | Simulated agent with buttons; agent keys and `/agent/api/*` | LEARNX Assistant on Groq; purchase cards in the chat with Approve / Pay / Cancel; simulated agent and API removed |
 | Chat UX | n/a | Finished cards fade out after 5 s; each payment keeps a one-line result; no tool chatter; model text cleaned (zero-width characters, leaked planning) |
 | Mock via agent | Server-side instant charge | Real mock checkout page, back to `/agent` |
 | Monitoring | Assistant chat only | Append-only **assistant log** with admin page (tokens, errors, flags) |
@@ -98,12 +98,12 @@ flowchart LR
     S[services/*<br/>orders, refunds, subscriptions,<br/>seats, quotas, agentPurchase,<br/>assistant, courseDocs, rateLimit]
     D[domain/*<br/>ledger, projection,<br/>decision, catalog]
     P[payment/*<br/>adapters, webhook processor,<br/>reconciliation, retries]
-    J[(background jobs<br/>retry 30s, recon 15m,<br/>agent sweep 1m, log purge 1h)]
+    J[(background jobs<br/>retry 30s, recon 15m, refund check 30s,<br/>agent sweep 1m, log purge 1h)]
   end
-  DB[(PostgreSQL<br/>21 tables)]
+  DB[(PostgreSQL<br/>23 tables)]
   RZ[Razorpay test mode]
   MK[Mock provider :3001]
-  LLM[Groq / Gemini]
+  LLM[Groq]
   UI --> R --> S --> D
   S --> P
   D --> DB
@@ -161,29 +161,29 @@ only one app instance should run.
 | `refunds.js` | The only place a provider refund is requested (claim → ask → reopen if refused) |
 | `checkoutOnce.js` | One order per checkout click (form key, advisory lock, stored checkout link) |
 | `subscriptions.js` | Pass state, one renewal at a time, Cancel renewal, full-pass refund, ending free periods |
-| `seats.js` | Organizations, seat packs, assign/unassign/reassign under an advisory lock |
+| `seats.js` | Organization requests (learner asks, admin approves or rejects), managers, seat packs, assign/unassign/reassign under an advisory lock, seats held by a member |
 | `pricingEngine.js` | Coupons and identity pricing; discount allocation across lines |
 | `quotas.js`, `aiSummary.js` | Daily credits (user or organization pool) for the demo AI summary |
 | `agentPurchase.js` | Purchase requests: propose, coupon quote, approve (signed token), execute, sweep, history |
-| `assistant.js` | Groq/Gemini chat loop, tools, reply cleaning, outcome lines, assistant log |
+| `assistant.js` | Groq chat loop, tools, reply cleaning, outcome lines, assistant log |
 | `courseDocs.js`, `markdown.js` | Course guides (publish/remove with history) and a safe Markdown renderer |
 | `rateLimit.js` | Login, sign-up and step-up limits, counted before the password check |
 | `cartSession.js`, `refundStatus.js`, `agentKeys.js` | Coupon cookie, "refund pending" check, the assistant's own agent identity |
 
-### 5.4 Routes and pages (`src/routes`, 71 handlers)
+### 5.4 Routes and pages (`src/routes`, 75 handlers)
 
 | Route file | Pages / endpoints |
 |---|---|
 | `auth.js` | Login, register (admin email reserved), logout |
-| `courses.js` | Course list, cards, pass banner, Access, Activity (user's ledger) |
+| `courses.js` | Course list, cards, pass banner, Access, Activity (user's ledger), access re-check of an open Courses page |
 | `cart.js` | Cart, coupons, checkout, cancelled checkout |
 | `checkout.js` | Single checkout, course and pass refunds, Razorpay checkout page |
 | `subscription.js` | Renew, Cancel renewal |
-| `org.js` | Organization page, seat checkout, assign/unassign/reassign, pack refund |
+| `org.js` | Organization page (request, manager tools, read-only seats of a member), seat checkout, assign/unassign/reassign, pack refund; admin Organizations page (approve / reject requests, read-only organizations) |
 | `ai.js` | Quota-limited AI summary |
 | `agent.js` | Assistant chat, purchase cards, coupon field, approve/pay/cancel, request page |
-| `content.js` | Admin Course content; learner course guide (access-checked) |
-| `admin.js` | Dashboard, users and grants, pricing rules, reconciliation, assistant log |
+| `content.js` | Admin Course content; learner course guide (access-checked, re-checked every 5 s) |
+| `admin.js` | Dashboard, users and grants (automated-test accounts counted apart), pricing rules, reconciliation, assistant log |
 | `webhooks.js` | Provider webhooks (raw body, verified, into the inbox) |
 | `commerce.js` | Access/ledger JSON; dev-only event route (off by default) |
 
@@ -201,7 +201,7 @@ refunds, records in `data.json` for reconciliation, failure switches, and an all
 | Shopping | `cart_items`, `orders`, `order_line_items` | Orders carry subtotal, discount, final amount, applied rule, `refund_scope`, `checkout_key`, `checkout_url` |
 | Ledger | `commerce_ledger` | Append-only (triggers); one reversal per event |
 | Webhooks & recon | `webhook_inbox`, `recon_runs`, `recon_issues` | Inbox unique per provider event id |
-| Organizations | `organizations`, `org_seat_pools` | Pack status; seats themselves are ledger events |
+| Organizations | `organizations`, `org_managers`, `org_requests`, `org_seat_pools` | Requests (pending / approved / rejected), managers, pack status; seats themselves are ledger events |
 | Quotas | `usage_counters`, `usage_events` | Atomic counters + per-request audit |
 | Agent | `purchase_intents`, `intent_events`, `agent_keys` | Requests (with list price, discount, coupon), full history |
 | Assistant | `assistant_messages`, `assistant_log` | Chat memory (user can clear) vs. append-only admin log |
@@ -265,39 +265,38 @@ sequenceDiagram
 The model never sees the approval token and has no tool that approves. Everything it proposes is
 re-checked on the server.
 
-## 8. Decision log (ADR-015 onwards)
+## 8. Decision log
 
-ADR-000 to ADR-014 (adapter contract, append-only ledger, PostgreSQL, inbox, retries, webhook-driven
-refunds, reconciliation by replay, sandbox providers, stacked pass periods, seats from the ledger, atomic
-quotas, AP2-inspired approval, the assistant as an untrusted agent, checkout instead of mandates) are in
-`Architecture_Decision_Records.md`. The decisions below were made in this session; each record lists
-context, the choice and its trade-off.
+All decisions are in [Architecture_Decision_Records.md](Architecture_Decision_Records.md) (25 records,
+restructured on 21 Nov 2026).
 
-| ADR | Decision | Context and alternatives | Trade-off | Milestone |
-|---|---|---|---|---|
-| 015 | **Purchase cards leave the chat; each payment keeps a one-line result** | Finished cards piled up; deleting them lost the record | Lines are written once (atomic insert), shown in every open tab | M7 |
-| 016 | **Mock purchases through the assistant use the mock checkout page** | The instant server charge hid the real flow and differed from Razorpay | One more click; same path as Razorpay | M7, M2 |
-| 017 | **Model failures withdraw the half-made request; limits show only their message** | A Groq limit after propose left a hidden open request | User re-asks; nothing half-done remains | M7 |
-| 018 | **Append-only assistant log, admin only** | Chat history is user-clearable and drops failed turns | More storage (90-day purge) | M8 |
-| 019 | **One renewal at a time; Cancel renewal refunds a paid renewal; Refund refunds the whole pass and ends free periods** | Refund removed only the latest period ("partial"); renewals could stack | Several provider refunds per pass; access stays until all confirm | M4, M6 |
-| 020 | **Seat checkout returns to `/org`; failed attempts are short notices** | Users landed on `/courses`; failed attempts stacked forever | Pack rows kept (late payments still activate) | M4 |
-| 021 | **One order per checkout click; one grant per admin form** | Double clicks created two orders / two scholarship periods | Form keys and a stored checkout link | M2, M4 |
-| 022 | **Course guides published by the admin and opened only with access, checked per request** | Access had nothing behind it; storing "has access" flags would break M3 | Polling every 30 s to close open guides; no caching | M3, M8 |
-| 023 | **A payment grants only if amount and currency match an order of that user** | Paying 0.01 on the mock form opened content; forged messages could name any product | A legitimate partial payment is refused and escalated | M2, M6 |
-| 024 | **Reconciliation escalates refused replays (PAYMENT_REFUSED)** | Refused replays were counted as "fixed" | More issues for the admin, none hidden | M6 |
-| 025 | **Rotate secrets; warn or refuse on example values; dev event route off by default** | Example secrets allowed forged admin sessions and payments | Everyone signed out once; mock must be restarted | Brief constraint |
-| 026 | **Limit password guessing (counted before the check), trust only a local proxy** | Unlimited guesses; parallel requests slipped past; ngrok made every visitor 127.0.0.1 | In-memory counters (single instance) | Security |
-| 027 | **Coupons on agent purchases, pinned in the signed approval** | Agents always paid list price; a coupon must not change the approved amount | Coupon re-checked at payment; stale cards refused | M4, M7 |
-| 028 | **Approve requires the amount the user saw and re-checks the password rule in the same update** | Removing a coupon during approval could skip the password | Old forms must be reloaded | M7 |
-| 029 | **Generic error messages with a reference** | SQL and provider errors reached the browser | Details only in the server log | Security |
-| 030 | **Light clean-up instead of a full restructure** | Review proposed config module, splits, ORM-free repositories, CI | Shared `orders.js`/`refunds.js`, helpers, tests in `test/`, dead code removed; bigger refactor declined by the owner | All |
-
-**Superseded or reversed decisions.**
-- The simulated agent and agent-key API (M7 v1) were replaced by the assistant (ADR-013); tamper and replay tests still run against the service.
-- Refunding only the latest pass period was replaced by ADR-019.
-- The mock's direct charge was replaced by ADR-016.
-- Saved-card mandates were removed (ADR-014).
-- AP2 was evaluated but not adopted: our approval is AP2-like inside one app. Signing with the user's own key (passkey/ES256) would be the step toward real AP2 mandates.
+| ADR | Decision | In one line |
+|---|---|---|
+| 000 | Methodology reaffirmed (9 Oct 2026) | Own provider-neutral core (ledger, projection, decision) on Node.js, PostgreSQL and htmx; built one component at a time |
+| 001 | Providers behind an adapter contract | Every provider's events become one internal event; the domain imports no provider code |
+| 002 | Append-only ledger in PostgreSQL | Access is computed from events; UPDATE/DELETE blocked; one reversal per event |
+| 003 | Webhook inbox | Every delivery saved first, unique per (provider, event id); a repeat is ignored |
+| 004 | Retries with backoff | 30 s … 1 h, DEAD after 8 attempts, escalated by reconciliation |
+| 005 | Refunds wait for the provider | Access ends only when the refund webhook confirms it |
+| 006 | Reconciliation replays | Lost events are replayed through the webhook path; the rest become issues (incl. `PAYMENT_REFUSED`) |
+| 007 | Sandbox providers | Razorpay test mode plus a mock with failure switches |
+| 008 | Pass as stacked paid periods | Manual renewal, one renewal at a time, Refund covers the whole pass |
+| 009 | Seats counted from the ledger | Seats in use counted from events under a lock; never over capacity |
+| 010 | Atomic quotas | One conditional UPDATE plus a request key; retries counted once |
+| 011 | Signed one-time approval (AP2-inspired) | Server-priced, user-approved, 5-minute single-use token; approve checks the shown amount and password rule in one update |
+| 012 | Untrusted LLM assistant | Groq model with a few server tools and no approve tool |
+| 013 | Agent pays through checkout | Saved-card mandates tried and removed (not on the Razorpay test account) |
+| 014 | Assistant log | Append-only log of every turn, admin-only, 90 days |
+| 015 | One order per click | Server-checked form keys for checkout and admin grants |
+| 016 | Course guides checked per request | Guide and Courses page re-check access every 5 s |
+| 017 | Payment must match its order | Same user, full amount, same currency, or nothing is granted |
+| 018 | Security hardening | Rotated and checked secrets, password-guess limits, generic errors |
+| 019 | Coupons fixed in the approval | The user pays exactly what they approved |
+| 020 | Seat-lock limit (proposed) | Known freeze under 10+ simultaneous assignments; fix prototyped, not in the code |
+| 021 | Two baselines | Naive and careful baselines on the same workloads |
+| 022 | Admin doesn't shop | Admin navbar only; shop pages closed to the admin |
+| 023 | Organizations by request | Learner requests, admin approves, manager assigns, members read-only |
+| 024 | Late refund webhooks | A refund pending over 90 s is confirmed with the provider |
 
 ## 9. Security model
 
@@ -311,7 +310,7 @@ context, the choice and its trade-off.
 | Content leakage | Access decided per request; `no-store`; no title without access; escaped Markdown |
 | Information leaks | Generic errors with reference; passwords never logged; request log off by default |
 
-A 30-case attack script plus two independent read-only reviews found the gaps that ADR-023 to ADR-029 close.
+A 30-case attack script plus two independent read-only reviews found the gaps that ADR-017 and ADR-018 close.
 After the fixes, the live re-run found 0 leaks.
 
 ## 10. Testing and evidence
@@ -330,9 +329,11 @@ After the fixes, the live re-run found 0 leaks.
 | `verify-security` | Rate limits (incl. parallel and proxied), forged sessions, dev route, errors, mock secret |
 | `verify-failure-switches` (live) | Duplicate, delay, drop payment, drop refund, reorder, refund API 500 |
 
-`npm run verify` runs the 11 database suites. The browser runs (`E2E-TESTS.md` sections 1–15) cover:
+`npm run verify` runs the 11 database suites. The browser and live runs (`E2E-TESTS.md` sections 1–21) cover:
 - Razorpay test cards, ngrok webhooks and live pass expiry;
-- guides closing within 30 s of a refund;
+- guides and the Courses page closing access within 5 s of a refund or an admin revoke;
+- organizations: request, approval, seat packs and read-only members;
+- a late refund webhook confirmed with the provider;
 - coupon purchases with the real model;
 - every fix above.
 
@@ -342,7 +343,7 @@ After the fixes, the live re-run found 0 leaks.
 |---|---|
 | `DATABASE_URL`, `JWT_SECRET`, `ADMIN_EMAIL` | Database, session signing, admin account |
 | `RAZORPAY_*`, `MOCK_WEBHOOK_SECRET`, `MOCK_PROVIDER_URL`, `STREAMFLIX_URL` | Providers (test mode only) |
-| `GROQ_API_KEY`, `GEMINI_API_KEY` | Assistant model and fallback |
+| `GROQ_API_KEY` | Assistant model |
 | `SUB_DURATION_MINUTES` | Demo: pass periods in minutes |
 | `RECON_*`, `WEBHOOK_RETRY_INTERVAL_MS`, `AGENT_*` | Reconciliation, retries, agent rules |
 | `ASSISTANT_LOG_DAYS`, `ASSISTANT_CARD_DONE_MS` | Log retention (90), card fade (5000) |

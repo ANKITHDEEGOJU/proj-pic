@@ -157,6 +157,37 @@ async function cleanup() {
   assert.equal((await status(passUser)).refresh, "true");
   console.log("[ok] All-Access Pass opens the guide; the moment the pass ends -> 403 SUBSCRIPTION_EXPIRED (no event needed)");
 
+  // ------------------------------------------------------------ admin revoke while pages are open
+  // The guide and the Courses page are already open when the admin revokes: both find out within
+  // one poll (every 5 s, and when the tab is shown again) and reload; the server refuses at once.
+  const granted = await newUser("granted");
+  const grant = await ledger.appendEvent({
+    eventId: `grant_${randomUUID()}`, eventType: "MANUAL_GRANT", userId: granted.id, productId: COURSE, quantity: 1,
+    amount: 0, currency: "USD", occurredAt: new Date().toISOString(), source: "ADMIN", actor: "verify-content",
+    entitlement: { kind: "COURSE" },
+  }, { method: "TEST" });
+  const openGuide = await doc(granted);
+  assert.equal(openGuide.status, 200);
+  assert.match(openGuide.text, /hx-get="\/courses\/[^"]+\/doc\/status" hx-trigger="every 5s, visibilitychange\[document\.visibilityState=='visible'\] from:document"/, "an open guide re-checks every 5 s and when shown again");
+  const coursesPage = await req(granted, "GET", "/courses");
+  const fp = /hx-get="\/courses\/access-state\?fp=([0-9a-f]{16})" hx-trigger="every 5s, visibilitychange/.exec(coursesPage.text)?.[1];
+  assert.ok(fp, "the Courses page carries an access watcher");
+  const stateNow = () => req(granted, "GET", `/courses/access-state?fp=${fp}`, { hx: true });
+  assert.equal((await stateNow()).status, 204, "unchanged access: nothing happens");
+  assert.equal((await stateNow()).refresh, null);
+  await ledger.appendEvent({
+    eventId: `admin_revoke_${randomUUID()}`, eventType: "MANUAL_REVOKE", userId: granted.id, productId: COURSE, quantity: 1,
+    amount: 0, currency: "USD", occurredAt: new Date().toISOString(), referenceeventId: grant.record.event.eventId,
+    source: "ADMIN", actor: "verify-content",
+  }, { method: "ADMIN_MANUAL_REVOKE" });
+  assert.equal((await doc(granted)).status, 403, "the guide is refused at once");
+  assert.equal((await status(granted)).refresh, "true", "the open guide reloads on its next check");
+  const changed = await stateNow();
+  assert.equal(changed.refresh, "true", "the open Courses page reloads on its next check");
+  assert.equal(changed.cache, "no-store");
+  assert.doesNotMatch((await card(granted)).text, /Open guide/, "after the reload the card has no Open guide");
+  console.log("[ok] admin revoke with the guide and Courses page open: server refuses at once; both pages re-check every 5 s (and when shown again) and reload");
+
   // ------------------------------------------------------------ admin removes
   const late = await ledger.appendEvent({
     eventId: `pay_${randomUUID()}`, eventType: "PURCHASE_SUCCEEDED", userId: buyer.id, productId: COURSE,

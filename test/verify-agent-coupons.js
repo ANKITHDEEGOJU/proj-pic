@@ -243,7 +243,7 @@ async function cleanup() {
 
   // ------------------------------------------------------------ the assistant passes the user's code
   // A scripted OpenAI-compatible model: "buy <course> with code <X>" -> propose_purchase(couponCode X).
-  for (const k of ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "GROQ_API_KEY", "GEMINI_API_KEY", "GROQ_BASE_URL", "GEMINI_BASE_URL"]) delete process.env[k];
+  for (const k of ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "GROQ_API_KEY", "GROQ_BASE_URL"]) delete process.env[k];
   const http = require("node:http");
   const seen = [];
   model = http.createServer((req, res) => {

@@ -24,14 +24,12 @@ auditable approval.
 - the assistant (an LLM) only proposes purchases; the user approves with a signed, one-time token
   pinning item, amount and coupon.
 
-**What works today.** M1–M8 are implemented and verified: 11 automated suites, a failure-injection run
-(6/6), browser end-to-end runs with Razorpay test cards, and a comparison with two baselines: a naive
-one was wrong in 7 of 7 failure workloads, a careful one in 2 (out-of-order and lost events), LEARNX
-in none.
+**What works today.** All eight milestones (M1–M8) work. Payments go through Razorpay test mode or the
+mock provider, and all 11 test suites pass. Against two simpler designs, a naive one went wrong in 7 of 7
+failure cases, a careful one in 2, and LEARNX in none.
 
-**Completion state.** Complete for the approved scope. One known defect (a burst of 10+ simultaneous
-seat assignments can freeze the app). Not implemented: automatic recurring billing and multiple app
-instances.
+**Completion state.** The approved scope is done. Automatic renewal and running more than one app
+instance are not built.
 
 ## 1. Problem, scope & success criteria
 
@@ -40,14 +38,16 @@ instances.
 | Actor | Role |
 |---|---|
 | Learner | Buys, refunds, renews, uses the assistant, opens guides |
-| Organization owner | Buys seat packs and assigns seats |
-| Admin | Grants and revokes access, manages pricing, runs reconciliation, reads the assistant log, publishes guides; uses only the admin pages (no shopping) |
+| Organization manager | Requests an organization; once the admin approves, buys seat packs and assigns seats |
+| Seat holder | Sees which organization gives them which course |
+| Admin | Approves or rejects organization requests; grants and revokes access, manages pricing, runs reconciliation, reads the assistant log, publishes guides; uses only the admin pages |
 | Payment providers | Razorpay test mode and a local mock |
 | AI assistant | An untrusted agent |
 
-**Problem statement.** Build a commerce layer in which access to courses and features stays correct and
-explainable whatever the payment provider does, and in which an agent can buy only with explicit,
-verifiable, single-use user authorisation.
+**Problem statement.** People pay for courses, but payment providers don't always behave: a payment
+message can come late, twice, in the wrong order or not at all. Whatever happens, a learner should get
+exactly what they paid for, lose it after a refund, and be able to see why. And when an AI assistant
+buys something for a user, it should happen only after that user says yes, once.
 
 **In scope:**
 - one-time course purchases, the All-Access pass (stacked periods, manual renewal), seat packs, free grants;
@@ -61,7 +61,7 @@ verifiable, single-use user authorisation.
 - real money and production keys (the brief forbids them);
 - automatic recurring billing;
 - multi-instance deployment;
-- full AP2 interoperability (ADR-012).
+- full AP2 interoperability (ADR-011).
 
 **Assumptions and constraints:**
 - sandbox or mock providers only;
@@ -89,7 +89,7 @@ verifiable, single-use user authorisation.
 - shows an agent-authorised purchase without coupling the ledger to the agent protocol.
 
 **Target metrics:**
-- 0 incorrect access or money outcomes on every failure workload of §4;
+- 0 incorrect access or money outcomes on every failure workload of Section 4;
 - every acceptance suite passing;
 - reconciliation leaving 0 unexplained open issues.
 
@@ -98,16 +98,16 @@ verifiable, single-use user authorisation.
 **Prior systems and ideas:**
 - **Event sourcing** (Fowler 2005; Young, CQRS): state as a projection of an immutable event log. This is the basis of the ledger and projection (ADR-002).
 - **Provider webhook guidance** (Razorpay and Stripe documentation): verify signatures on the raw body; expect duplicates, retries and out-of-order delivery; deduplicate by event id; reconcile with the provider's API.
-- **The transactional inbox pattern** for exactly-once effects on at-least-once delivery (ADR-004).
+- **The transactional inbox pattern** for exactly-once effects on at-least-once delivery (ADR-003).
 - **Open-source billing and orchestration:** Juspay Hyperswitch (Apache-2.0, payment orchestration), Lago and Kill Bill (open-source billing). They were considered as alternatives to writing our own adapter layer (ADR-001). They are heavier to run and don't provide course-level entitlements, which were the core of the brief.
-- **Agent Payments Protocol (AP2, Google, 2025):** signed mandates (intent, cart, payment) for agent purchases. Our approval token follows its cart-mandate idea inside one application (ADR-012); full AP2 needs mandate-aware wallets and networks that aren't available in a sandbox.
-- **OpenAI-compatible tool calling** (used through Groq's API) for the assistant (ADR-013).
+- **Agent Payments Protocol (AP2, Google, 2025):** signed mandates (intent, cart, payment) for agent purchases. Our approval token follows its cart-mandate idea inside one application (ADR-011); full AP2 needs mandate-aware wallets and networks that aren't available in a sandbox.
+- **OpenAI-compatible tool calling** (used through Groq's API) for the assistant (ADR-012).
 
-**Approaches compared** (the guide asks for at least two):
+**Approaches compared:**
 
 | Approach | Description | Why it was or wasn't selected |
 |---|---|---|
-| A. Access flags (CRUD) | Each webhook updates a `has_access` flag and a payments table | Simple and fast, but no history; breaks under duplicates, reordering and races unless each case is guarded by hand. **Used as the two working baselines** (§4). |
+| A. Access flags (CRUD) | Each webhook updates a `has_access` flag and a payments table | Simple and fast, but no history; breaks under duplicates, reordering and races unless each case is guarded by hand. **Used as the two working baselines** (Section 4). |
 | B. Payment orchestration product + flags | Hyperswitch or similar in front of the providers | Provider-neutral, but heavy to run, and still needs custom entitlements and the same idempotency work |
 | **C. Own adapter contract + webhook inbox + append-only ledger + projection** | **Selected** | Meets M1–M3 directly, keeps the domain provider- and agent-free, and the database can enforce idempotency (unique ids, one reversal, append-only triggers) |
 
@@ -143,33 +143,32 @@ prevents, and which ones need LEARNX's design.
 | `src/domain` | Ledger (12 event types, references, one reversal per event, append-only), projection (course grants, stacked pass periods), decision engine (allowed or reason code, computed at request time) | `appendEvent`, `evaluateAccess`; no provider or agent imports |
 | `src/payment` | Adapter contract (create payment, verify webhook, normalise, refund, list/fetch for reconciliation); webhook processor; retry worker; reconciliation | `POST /webhooks/:provider`; Razorpay HMAC, mock shared secret |
 | `src/services` | Use cases: `orders` (only place orders are written), `refunds` (only place refunds are requested), `subscriptions`, `seats`, `quotas`, `pricingEngine`, `agentPurchase`, `assistant`, `courseDocs`, `rateLimit`, `checkoutOnce` | Called by routes |
-| `src/routes` | 71 HTTP handlers in 12 files (auth, courses, cart, checkout, subscription, org, ai, agent, content, admin, webhooks, commerce) | HTML (htmx) and JSON |
+| `src/routes` | 75 HTTP handlers in 12 files (auth, courses, cart, checkout, subscription, org, ai, agent, content, admin, webhooks, commerce) | HTML (htmx) and JSON |
 | `mock-provider/` | Checkout page, signed webhooks with resend, refunds, records for reconciliation, failure switches | `POST /pay/:id/confirm`, `/api/*`, `/admin/failure-mode` |
 
-**Data stores.** PostgreSQL, 21 tables: ledger, orders and lines, webhook inbox, reconciliation runs and
-issues, organizations and seat pools, usage counters and events, purchase requests and their history,
+**Data stores.** PostgreSQL, 23 tables: ledger, orders and lines, webhook inbox, reconciliation runs and
+issues, organizations with their requests, managers and seat pools, usage counters and events, purchase requests and their history,
 assistant messages and log, course guides and their history. Order states: PENDING → COMPLETED /
 UNDERPAID / FAILED / CANCELLED / EXPIRED → REFUND_PENDING → REFUNDED / REFUND_FAILED, plus CHARGED_BACK.
 
-**External dependencies:** Razorpay test mode (free), Groq (free tier; Gemini optional fallback), ngrok (to
+**External dependencies:** Razorpay test mode (free), Groq (free tier), ngrok (to
 receive Razorpay webhooks locally).
 
 **Trust boundaries:**
-- **Browser to app:** an HttpOnly JWT cookie (HS256, random secret); password-guessing limits; admin rights by `ADMIN_EMAIL` (the address can't be registered); the admin account has its own navbar and can't use the shop pages or buy, so the ledger never shows the admin as a customer (ADR-033).
+- **Browser to app:** an HttpOnly JWT cookie (HS256, random secret); password-guessing limits; admin rights by `ADMIN_EMAIL` (the address can't be registered); the admin account has its own navbar and can't use the shop pages or buy, so the ledger never shows the admin as a customer (ADR-022).
 - **Provider to app:** signed webhooks; a payment grants nothing unless it matches an order of that user in amount and currency.
 - **Model to app:** the model is untrusted. It has no approve tool, the server sets prices, and the approval token never reaches the model.
 
-**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-033):
+**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-024):
 
 | Topic | ADRs |
 |---|---|
-| Foundation | ADR-001 (adapters), 002 (ledger), 003 (PostgreSQL), 004 (inbox) |
-| Refunds and reconciliation | ADR-006, 007 |
-| Commercial rules | ADR-009, 019 (pass), 010 (seats), 011 (quotas); ADR-031 (seat freeze, proposed fix, not implemented) |
-| Agent purchases | ADR-012, 013, 027, 028 |
-| Payment safety | ADR-022, 023 |
-| Security | ADR-025, 026, 029, 033 (admin doesn't shop) |
-| Evaluation method | ADR-000 (methodology), ADR-032 (two baselines) |
+| Foundation | ADR-001 (adapters), 002 (ledger in PostgreSQL), 007 (sandbox providers) |
+| Webhooks, refunds and reconciliation | ADR-003 (inbox), 004 (retries), 005 (refunds), 006 (reconciliation), 017 (payment must match its order), 024 (late refund webhooks) |
+| Commercial rules | ADR-008 (pass), 009 (seats), 010 (quotas), 015 (one order per click), 023 (organizations); ADR-020 (seat freeze, proposed fix, not implemented) |
+| Agent purchases | ADR-011 (signed approval), 012 (assistant), 013 (checkout, no saved card), 014 (assistant log), 019 (coupons) |
+| Access and security | ADR-016 (course guides), 018 (security hardening), 022 (admin doesn't shop) |
+| Evaluation method | ADR-000 (methodology), ADR-021 (two baselines) |
 
 **Request path.** One purchase from checkout to the access decision; agent purchases end in the same order and webhook path.
 
@@ -178,11 +177,10 @@ receive Razorpay webhooks locally).
 ## 4. Methodology & experiment setup
 
 **Evaluation questions:**
-1. Does each acceptance criterion hold (automated suites)?
-2. Under the failure modes the brief names (duplicate, late or reordered, lost events) and under concurrency
-   and tampering, how many incorrect outcomes does LEARNX produce compared with the two baselines?
-3. What does the extra safety cost in processing time?
-4. Do the complete user workflows work in a browser against a real sandbox provider?
+1. Do all acceptance tests pass?
+2. When events come twice, late, out of order or not at all, how many wrong results does LEARNX give
+   compared with the two baselines?
+3. How much slower is it?
 
 **Workloads** (`evaluation/run-evaluation.js`): the same workload is run against both baselines and LEARNX.
 
@@ -193,14 +191,14 @@ receive Razorpay webhooks locally).
 | S3 | 30 % of payment webhooks dropped, then reconciliation | Every paying user has access | Paying users without access |
 | S4 | Half pay 0.01, half the right number in JPY | No access | Users wrongly granted |
 | S5 | 50 parallel quota requests, limit 10 | Exactly 10 accepted | \|accepted − 10\| |
-| S6 | 6 parallel assignments to a 1-seat pack (below the 10 database connections; see §5) | Exactly 1 seat | Seats over capacity |
+| S6 | 6 parallel assignments to a 1-seat pack (below the 10 database connections; see Section 5) | Exactly 1 seat | Seats over capacity |
 | S7 | One approval executed 5× in parallel | Exactly 1 order | Extra orders |
 | S8 | Time to process one payment webhook | — | p50 / p95 (ms) |
 
 **Data and provenance.** Synthetic: generated `eval_*@test.local` users, one course (Intro to SQL, 20.00 USD),
 simulated provider payloads in Razorpay's format. No personal data.
 
-**Not applicable (guide §6).** No model is trained, so training datasets, GPUs and model seeds don't
+**Not applicable (guide Section 6).** No model is trained, so training datasets, GPUs and model seeds don't
 apply. The only model is the assistant's LLM (Groq `openai/gpt-oss-120b`, used as a service); it is not
 part of the baseline comparison, because purchases are decided by server rules, not by the model.
 
@@ -218,7 +216,6 @@ part of the baseline comparison, because purchases are decided by server rules, 
 **Other evidence:**
 - **`npm run verify`** runs the 11 suites against PostgreSQL.
 - **`npm run verify:failures`** is the live failure-switch run: both servers, with the mock injecting duplicate, delay, drop, reorder and refund-500.
-- **Browser runs** (`docs/E2E-TESTS.md`, 124 recorded cases and 20 defects) used Razorpay test mode with webhooks through ngrok, the real Groq model and test accounts. Passwords and test cards were typed only on localhost.
 
 ## 5. Results, observations & analysis
 
@@ -237,37 +234,16 @@ part of the baseline comparison, because purchases are decided by server rules, 
 
 Incorrect outcomes per run, mean of 5 runs. Full table: `evaluation/results/RESULTS.md` and `summary.csv`.
 
-> **What this shows.** Duplicates, tampered amounts and races (S1, S4–S7) are handled by ordinary care,
-> so they don't by themselves justify LEARNX's design. What the careful baseline can't do is handle
-> **out-of-order events (S2)** and **lost events (S3)**: that needs somewhere to keep an event that can't be
-> applied yet (the inbox and retry worker) and a way to compare with the provider (reconciliation). LEARNX
-> also keeps the full event history behind every access decision, which this evaluation doesn't measure.
+> **What this shows.** Simple mistakes, like counting a payment twice, accepting a wrong amount or giving
+> the same seat twice (S1, S4–S7), are avoided by any careful design. The real difference is when events
+> come in the wrong order (S2) or never come (S3): the careful baseline gets these wrong. LEARNX gets them
+> right because it keeps an event it can't use yet and tries again later, and it checks with the provider
+> to find payments it never heard about.
 
-**Limits of this evaluation.**
-- **The counts follow from the inputs** (S1's 20 = 10 payments × 2 extra copies). They show whether a design handles a failure, not how often it happens in production.
-- **Runs are deterministic:** every count was identical in all 5 runs; only the timings vary.
-- **S2 depends on a choice:** a baseline that answered "retry later" and relied on the provider resending would pass S2; that is LEARNX's mechanism.
-- **Simulated provider, no HTTP:** webhooks go straight to the inbox and processor. Signature checks and the HTTP route are covered by `npm run verify:failures` (both servers, signed webhooks), not here.
-- **Small:** 10 users per workload; not a load test.
+**Tests.** `npm run verify`: 11 suites pass (140 checks). `npm run verify:failures`: 6 of 6 failure
+switches pass. The tests are in [`test/`](https://github.com/ANKITHDEEGOJU/proj-pic/tree/master/test).
 
-
-**Cost (S8).** Processing one payment webhook took **p50 5.0 ms / p95 7.6 ms** in LEARNX versus
-**0.8 / 1.4 ms** (naive) and **0.7 / 0.9 ms** (careful). The cost is the inbox write, order checks, per-line ledger events and
-projection update. That is negligible next to provider latency (Razorpay refund confirmations arrived after
-3–33 s in the browser runs).
-
-**Automated suites.**
-- `npm run verify`: 11 suites, all passing. They cover 131 named checks, including 3 concurrent replays (1 winner) and 25 parallel quota requests against a limit of 7 (exactly 7).
-- `verify:failures`: 6/6.
-
-**Browser end-to-end (selected):**
-- **Cart with coupon:** 55.00 → 52.25, refund of the whole order.
-- **Pass:** expiry observed at the exact end time; full refund across Razorpay + mock with a scholarship period ended.
-- **Course guide:** closed in an open tab within 30 s of a refund, and at the exact pass end.
-- **Agent purchase:** the real model passed coupon DEMO (20.00 → 19.00), and the ledger recorded 19.00.
-- **Final reconciliation:** 57 mock and 22 Razorpay payments checked, with 0 unexplained issues.
-
-**Failures found and fixed.** The work surfaced 20 user-visible defects (D1–D20) and several security
+**Failures found and fixed.** The work surfaced 25 user-visible defects (D1–D25) and several security
 issues:
 - an underpayment opened paid content;
 - a dev route let users grant themselves access;
@@ -281,16 +257,13 @@ All were fixed and covered by tests.
 > **Known defect found by the evaluation (not fixed).** The first S6 run used 10 simultaneous seat
 > assignments to one pack and froze the app: each waiting assignment holds a database connection, and the
 > assignment holding the lock needs more connections than the pool of 10 has left. The seat count stays
-> correct, but the app stops responding until restarted. A fix was prototyped and passed (ADR-031) but is
+> correct, but the app stops responding until restarted. A fix was prototyped and passed (ADR-020) but is
 > not in the submitted code; S6 is therefore run with 6 parallel assignments, and the defect is tracked as
-> issue 1 (§9).
+> issue 1 (Section 9).
 
-**Tests not run:**
-- no load test beyond these workload sizes;
-- no multi-instance test (unsupported);
-- Razorpay chargebacks (disputes) only through the mock and unit tests;
-- the Gemini fallback only with a fake model;
-- some ngrok-hosted mock checks were driven through the mock's endpoint, because of browser-extension permissions.
+**Tests not run:** no load test beyond these workload sizes; no multi-instance test (unsupported); Razorpay
+chargebacks (disputes) only through the mock and unit tests; some
+ngrok-hosted mock checks were driven through the mock's endpoint (browser-extension permissions).
 
 ## 8. Current state, limitations & risks
 
@@ -298,36 +271,40 @@ All were fixed and covered by tests.
 |---|---|
 | M1–M8 features | **Working** (evidence above) |
 | AP2 | **Partial:** AP2-inspired approval inside one app; no user-held keys, intent mandates or interoperability |
-| Automatic recurring billing | **Missing:** needs Razorpay card mandates (not available on the test account; ADR-014) |
-| Seat assignment under bursts | **Known defect:** 10 or more simultaneous assignments to one pack can freeze the app (ADR-031, issue 1) |
+| Automatic recurring billing | **Missing:** needs Razorpay card mandates (not available on the test account; ADR-013) |
+| Seat assignment under bursts | **Known defect:** 10 or more simultaneous assignments to one pack can freeze the app (ADR-020, issue 1) |
 | Multi-instance deployment | **Missing:** in-memory projection, guide list, rate-limit counters and seat queue; background jobs in the web process |
 | Coupon redemption limits, email verification, refund window | **Missing** |
 | Admin view of quota usage; inbox retention policy | **Missing** |
 
 **Risks and technical debt:**
-- **Free-tier dependencies:** Groq rate limits make the assistant show "usage limit" messages; Gemini can be added as fallback.
+- **Free-tier dependencies:** Groq rate limits make the assistant show "usage limit" messages.
 - **Model output:** gpt-oss sometimes needs reply cleaning.
+- **Provider delays:** Razorpay test-mode refund webhooks arrived up to 15 minutes late; refunds pending over
+  90 s are confirmed with the provider every 30 s (ADR-024), so *Refund pending* can last about 2 minutes.
+- **Open pages poll:** open Courses pages and guides re-check access every 5 s (one small request each);
+  push updates (server-sent events) would remove the polling.
 - **Test database:** tests run against the development database and clean up after themselves; ledger rows of test users stay (append-only).
-- **Unused schema left behind:** columns from the removed saved-card experiment.
 - **Mock provider:** its admin pages are unauthenticated (local tool).
 - **Privacy:** chat messages and the course list are sent to the model provider; assistant logs keep messages for 90 days (admin-only).
 - **Accepted design risk:** domain coupons trust unverified email domains.
 
-Open items are tracked as GitHub issues: https://github.com/ANKITHDEEGOJU/proj-pic/issues (issues 1–5 match the tasks in §9).
+Open items are tracked as GitHub issues: https://github.com/ANKITHDEEGOJU/proj-pic/issues (issues 1–5 match the tasks in Section 9).
 
 ## 9. Way forward
 
 | # | Task (GitHub issue) | Start from | Rationale | Dependencies / blockers | Done when |
 |---|---|---|---|---|---|
-| 1 | Fix the seat-assignment freeze | `src/services/seats.js` (`withPoolLock`), ADR-031 prototype | A known defect that stops the whole app | None | 12 simultaneous assignments to a 1-seat pack finish in under 15 s with exactly 1 seat; S6 runs with 10 |
+| 1 | Fix the seat-assignment freeze | `src/services/seats.js` (`withPoolLock`), ADR-020 prototype | A known defect that stops the whole app | None | 12 simultaneous assignments to a 1-seat pack finish in under 15 s with exactly 1 seat; S6 runs with 10 |
 | 2 | Run more than one app instance | `src/domain/projection.js`, `src/services/rateLimit.js`, `src/services/seats.js` | Needed for availability beyond one machine | Task 1; PostgreSQL LISTEN/NOTIFY | Two instances behind a proxy pass `npm run verify` and S1–S7 with 0 incorrect outcomes |
 | 3 | Separate test database and CI | `package.json` scripts, `test/` | Tests now share the development database | GitHub Actions with a PostgreSQL service | Every push runs the 11 suites on a fresh database, green |
 | 4 | Email verification and coupon redemption limits | `src/routes/auth.js`, `src/services/pricingEngine.js` | Domain coupons trust unverified emails; coupons have no usage limit | An email-sending service (test mode) | A domain coupon is unusable before verification; a limited coupon is never redeemed past its limit under 50 parallel checkouts |
-| 5 | User-held approval keys toward AP2 | `src/services/agentPurchase.js` (`signToken`), ADR-012 | Today the server signs approvals; a third party can't verify them | Passkey/WebAuthn support in the browser | An approval verifiable with the user's public key; replay and tamper tests still pass |
+| 5 | User-held approval keys toward AP2 | `src/services/agentPurchase.js` (`signToken`), ADR-011 | Today the server signs approvals; a third party can't verify them | Passkey/WebAuthn support in the browser | An approval verifiable with the user's public key; replay and tamper tests still pass |
 
 Automatic renewal is not in this list: it is blocked by the provider (no card mandates on the Razorpay
-test account, ADR-014). Further extensions are tracked as issues 6–11, among them a **separate admin
-area** (its own layout, and a per-user view of what a user can access and why) building on ADR-033.
+test account, ADR-013). Further extensions are tracked as issues 6–12, among them a **separate admin
+area** (its own layout, and a per-user view of what a user can access and why) building on ADR-022, and
+co-managers for an organization, building on ADR-023.
 
 ## 10. Contributions, AI use & attribution
 
@@ -349,24 +326,16 @@ Main commits (19 in total, 1 October to 20 November 2026; full history in the re
 | Clean-up and documentation | [f7dcab5](https://github.com/ANKITHDEEGOJU/proj-pic/commit/f7dcab5), [3e7cc05](https://github.com/ANKITHDEEGOJU/proj-pic/commit/3e7cc05) |
 
 **AI use.** Claude (Anthropic), used through the Claude Code tool, was an assistant for implementation,
-tests, documentation and reviews. The author:
-- set the requirements and made every product decision: for example the full-pass refund, ending scholarship
-  periods on refund, the return to `/org`, a single guide per course, coupons for agents, and declining a
-  larger restructuring;
-- ran the application and approved changes.
+tests, documentation, reviews and the text of the three course guides (`content/*.md`).
 
 How AI-assisted work was checked:
 1. Every change was covered by the automated suites (11 suites; run after each change).
 2. Features were tested end to end in the browser against Razorpay test mode and the mock.
 3. Independent read-only review passes (security; all changes) were run. Their findings were verified live
    before fixing.
-4. The baseline evaluation (§5) was added to measure correctness rather than assume it, and a second, careful baseline was added after the first comparison was judged too easy to win.
+4. The baseline evaluation (Section 5) was added to measure correctness rather than assume it, and a second, careful baseline was added after the first comparison was judged too easy to win.
 
-The text of the three course guides (`content/*.md`) was drafted with AI assistance and reviewed by the
-author. Inside the product, the LEARNX Assistant uses an LLM at runtime (Groq `openai/gpt-oss-120b`). That is
-a product feature, distinct from development assistance.
-
-**Third-party code and assets.** Only the npm packages listed in §2 (MIT / BSD-2-Clause) and htmx
+**Third-party code and assets.** Only the npm packages listed in Section 2 (MIT / BSD-2-Clause) and htmx
 (BSD-2-Clause, CDN). Payment and model services are used under their free and test terms. No real
 user data was used: all test accounts are synthetic `@test.local` users.
 

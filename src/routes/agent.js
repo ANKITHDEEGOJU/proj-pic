@@ -1,5 +1,5 @@
 'use strict';
-// M7: agent-approved purchases, made by LEARNX Assistant (a real AI agent: Groq / Gemini, see
+// M7: agent-approved purchases, made by LEARNX Assistant (a real AI agent on Groq, see
 // services/assistant.js). The purchase rules themselves are in services/agentPurchase.js.
 //
 // Pages (login session only):

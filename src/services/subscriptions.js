@@ -159,6 +159,18 @@ async function refundPeriods({ ledger, catalog, user, periods, kind }) {
   return results;
 }
 
+// Renew puts the pass in the cart and opens /cart. If the customer leaves without paying, that
+// renewal stays in the cart; once the pass is refunded or renewal is cancelled it would show up as
+// "In Cart" and invite a checkout nobody asked for, so it is removed.
+async function dropPassFromCart(catalog, userId, scope = 'ALL_ACCESS') {
+  const ids = (catalog?.list?.() || [])
+    .filter((p) => p.type === 'SUBSCRIPTION' && (p.scope || 'ALL_ACCESS') === scope)
+    .flatMap((p) => [p.slug, p.id].filter(Boolean));
+  if (!ids.length) return 0;
+  const { rowCount } = await pool.query('DELETE FROM cart_items WHERE user_id=$1 AND product_id = ANY($2::text[])', [userId, ids]);
+  return rowCount;
+}
+
 // Refund (button): every paid period of the current pass, the running one and any renewal.
 async function refundPass({ ledger, projection, catalog, user, scope = 'ALL_ACCESS' }) {
   const ent = activePass(projection, user.id, scope);
@@ -166,7 +178,9 @@ async function refundPass({ ledger, projection, catalog, user, scope = 'ALL_ACCE
   if (!paid.length) return { ok: false, message: 'Nothing to refund.' };
   const results = await refundPeriods({ ledger, catalog, user, periods: paid, kind: 'PASS_FULL' });
   const failed = results.filter((r) => !r.ok);
-  return { ok: failed.length < results.length, results, failed, periods: paid.length };
+  const ok = failed.length < results.length;
+  if (ok) await dropPassFromCart(catalog, user.id, scope);
+  return { ok, results, failed, periods: paid.length };
 }
 
 // Once every part of a full pass refund is done (no order of it still pending, no paid period
@@ -225,6 +239,7 @@ async function cancelRenewal({ ledger, projection, catalog, user, scope = 'ALL_A
   }
   const now = Date.now();
   const current = livePeriods(ent).find((p) => Date.parse(p.startsAt) <= now) || ent.periods[ent.periods.length - 1];
+  await dropPassFromCart(catalog, user.id, scope);
   if (ent.cancelledAt) return { ok: true, already: true, refunded, ent };
   await ledger.appendEvent(
     {
@@ -257,5 +272,5 @@ const cardOpts = (st) => ({
 module.exports = {
   cardOpts, activePass, isRenewal, renewalReminder, cancelRenewal, REMINDER_DAYS,
   livePeriods, livePaidPeriods, queuedRenewals, passState, renewBlocked, pendingRenewalOrder,
-  refundPeriods, refundPass, finishPassRefund,
+  refundPeriods, refundPass, finishPassRefund, dropPassFromCart,
 };

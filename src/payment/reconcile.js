@@ -14,6 +14,9 @@
 //     STUCK_REFUND_REOPENED    order REFUND_PENDING too long, provider has NO refund:
 //                              nothing moved, so the order is reopened (customer can retry)
 //     ORDER_STATUS             order header disagrees with the ledger (e.g. PENDING but paid)
+//     REFUND_CONFIRMED         order REFUND_PENDING for a short while (REFUND_CHECK_AFTER_SECONDS),
+//                              provider already has the refund: its late webhook is replayed now
+//                              (confirmPendingRefunds, run every REFUND_CHECK_INTERVAL_MS)
 //   escalated (OPEN, for an admin)
 //     AMOUNT_MISMATCH, PARTIAL_REFUND, REFUNDED_NOT_AT_PROVIDER, LEDGER_PAYMENT_NOT_AT_PROVIDER,
 //     UNKNOWN_PAYMENT, STUCK_REFUND_PENDING, REFUND_FAILED, WEBHOOK_DEAD, REPLAY_FAILED
@@ -42,6 +45,9 @@ class Reconciler {
     pendingExpiryMinutes = Number(process.env.ORDER_PENDING_EXPIRY_MINUTES || 60),
     // Events younger than this are left alone: their webhook is probably still on its way.
     graceSeconds = Number(process.env.RECON_GRACE_SECONDS || 120),
+    // A refund still pending this long is checked with the provider directly (the provider's own
+    // webhook normally arrives first: Razorpay test mode about 76 s after the refund).
+    refundCheckSeconds = Number(process.env.REFUND_CHECK_AFTER_SECONDS ?? 90),
     log = console,
   }) {
     this.ledger = ledger;
@@ -51,6 +57,7 @@ class Reconciler {
     this.stuckMinutes = stuckMinutes;
     this.pendingExpiryMinutes = pendingExpiryMinutes;
     this.graceSeconds = graceSeconds;
+    this.refundCheckSeconds = refundCheckSeconds;
     this.log = log;
     this.processor = new WebhookProcessor({ ledger });
   }
@@ -247,6 +254,56 @@ class Reconciler {
         details: { from: rows[0].old, to: expected },
       });
     }
+  }
+
+  // ---- refunds waiting for a late webhook ---------------------------------------------------
+  // The refund button only asks the provider; access ends when the provider confirms (webhook).
+  // When that webhook is late (Razorpay test mode sometimes sends it 15 minutes later), the
+  // customer would wait for the next full run. This light check asks the provider about each
+  // order pending for more than refundCheckSeconds and, if the refund is there, replays its
+  // event through the webhook pipeline now. If the provider has no refund yet nothing is done;
+  // the full run's stuck-refund check (stuckMinutes) still decides later. A run row is written
+  // only when something is applied, so the reconciliation page is not filled with empty checks.
+  async confirmPendingRefunds({ trigger = 'refund-check' } = {}) {
+    const providers = this.providers.filter((n) => this.adapters[n]?.supportsReconciliation);
+    const { rows: pending } = await pool.query(
+      `SELECT o.id, o.provider,
+              (SELECT l.payment_info->>'providerPaymentId' FROM commerce_ledger l
+                WHERE l.payment_info->>'orderId' = o.id::text AND l.event_type = ANY($3)
+                ORDER BY l.ledger_sequence_id LIMIT 1) AS pid
+         FROM orders o
+        WHERE o.status='REFUND_PENDING' AND o.provider = ANY($1)
+          AND o.updated_at < now() - make_interval(secs => $2)`,
+      [providers, this.refundCheckSeconds, GRANT_TYPES]
+    );
+    let ctx = null;
+    for (const order of pending) {
+      if (!order.pid) continue;
+      const adapter = this.adapters[order.provider];
+      try {
+        const txn = await adapter.fetchPayment(order.pid);
+        const refund = txn && (await adapter.fetchRefunds(order.pid)).find((r) => r.status !== 'failed');
+        if (!refund) continue;
+        if (!ctx) {
+          const { rows } = await pool.query('INSERT INTO recon_runs (trigger, since) VALUES ($1, now()) RETURNING id', [trigger]);
+          ctx = { runId: rows[0].id, fixed: [], issues: [], seen: new Set(), checked: {} };
+        }
+        await this.#replay(ctx, adapter, adapter.recoveryEvent('refund', txn, refund), 'REFUND_CONFIRMED', refund.providerRefundId, {
+          provider: order.provider,
+          orderId: order.id,
+          details: { providerPaymentId: order.pid, providerRefundId: refund.providerRefundId, providerStatus: refund.status },
+        });
+      } catch (e) {
+        // A provider that can't be reached now is simply asked again on the next check.
+        this.log.error?.(`[refund-check] order ${order.id} (${order.provider}): ${e.message || e}`);
+      }
+    }
+    if (!ctx) return { checked: pending.length, fixed: 0 };
+    const summary = { checked: pending.length, fixed: ctx.fixed.length, openIssues: ctx.issues.length,
+      byKind: [...ctx.fixed, ...ctx.issues].reduce((m, x) => ((m[x.kind] = (m[x.kind] || 0) + 1), m), {}) };
+    await pool.query('UPDATE recon_runs SET finished_at=now(), summary=$2 WHERE id=$1', [ctx.runId, summary]);
+    this.log.log?.(`[refund-check] run ${ctx.runId}: ${summary.fixed} refund(s) confirmed with the provider`);
+    return { runId: ctx.runId, ...summary };
   }
 
   // ---- orders stuck in REFUND_PENDING ---------------------------------------------------

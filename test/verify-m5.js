@@ -133,8 +133,9 @@ async function cleanup() {
   };
   const owner = await newUser("owner");
   const [a, b] = [await newUser("a"), await newUser("b")];
-  const pack = await seats.createSeatPackOrder({ userId: owner.id, orgName: "M5 Test Org", course, seats: 2, provider: PROVIDER });
-  orgIds.push(pack.org.id);
+  const org = await seats.createOrg({ name: `M5 Test Org ${randomUUID().slice(0, 6)}`, managerEmails: owner.email, actor: "test:m5" });
+  orgIds.push(org.id);
+  const pack = await seats.createSeatPackOrder({ userId: owner.id, orgId: org.id, course, seats: 2, provider: PROVIDER });
   const pay = {
     id: `pay_${randomUUID().replace(/-/g, "").slice(0, 14)}`, entity: "payment", amount: Math.round(course.price * 200),
     currency: "USD", status: "captured", created_at: Math.floor(Date.now() / 1000),

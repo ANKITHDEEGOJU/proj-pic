@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Builds docs/Project_Report.pdf from docs/Project_Report.md (no extra packages; needs Google Chrome):
-#   python3 docs/build_report.py docs/Project_Report.md /tmp/report.html docs 1,3,4,5,8
+#   python3 docs/build_report.py docs/Project_Report.md /tmp/report.html docs 1,4
 #   google-chrome --headless=new --no-pdf-header-footer --allow-file-access-from-files \
 #     --print-to-pdf=docs/Project_Report.pdf file:///tmp/report.html
 # The last argument lists the sections that start on a new page.

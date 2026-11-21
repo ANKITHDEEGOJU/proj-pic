@@ -9,7 +9,10 @@
 //   - malformed ids on org routes: 404, no crash
 //   - the admin stays in the admin pages: admin navbar, login lands on /admin, shopper pages
 //     redirect, shopper actions refused; guides and /org/<id> stay open; learners unaffected
-// Removes its requests and quota rows; its @test.local users stay.
+//   - organizations (ADR-023): a learner requests one, only the admin approves / rejects; the
+//     requester then manages it (buys, assigns); the admin only looks; a seat holder only sees
+//     their organization and course
+// Removes its requests, quota rows, organizations and orders; its @test.local users stay.
 process.env.LOGIN_MAX_FAILS = "3";
 process.env.LOGIN_MAX_PER_IP = "1000";
 process.env.REGISTER_MAX_PER_IP = "1000";
@@ -17,6 +20,7 @@ process.env.STEPUP_MAX_FAILS = "3";
 process.env.AGENT_STEPUP_ABOVE_CENTS = "1";
 delete process.env.ENABLE_DEV_EVENTS;
 require("dotenv").config();
+process.env.MOCK_PROVIDER_URL = "http://mock.test"; // seat checkout links only; nothing is called
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 const express = require("express");
@@ -34,10 +38,19 @@ const limit = require("../src/services/rateLimit");
 const resetLogin = () => { for (const k of [...limit._buckets.keys()]) if (/^login(Fail|Email|Ip):/.test(k)) limit._buckets.delete(k); };
 
 const userIds = [];
+const orgIds = [];
 let server;
 async function cleanup() {
   if (server) server.close();
+  if (orgIds.length) {
+    await pool.query("DELETE FROM org_seat_pools WHERE org_id = ANY($1::uuid[])", [orgIds]);
+    await pool.query("DELETE FROM organizations WHERE id = ANY($1::uuid[])", [orgIds]);
+  }
   if (!userIds.length) return;
+  await pool.query("DELETE FROM org_requests WHERE user_id = ANY($1::uuid[])", [userIds]);
+  const orders = (await pool.query("SELECT id FROM orders WHERE user_id = ANY($1::uuid[])", [userIds])).rows.map((r) => r.id);
+  await pool.query("DELETE FROM order_line_items WHERE order_id = ANY($1::uuid[])", [orders]);
+  await pool.query("DELETE FROM orders WHERE id = ANY($1::uuid[])", [orders]);
   const intents = (await pool.query("SELECT id FROM purchase_intents WHERE user_id = ANY($1::uuid[])", [userIds])).rows.map((r) => r.id);
   await pool.query("DELETE FROM intent_events WHERE user_id = ANY($1::uuid[]) OR intent_ref = ANY($2::text[])", [userIds, intents]);
   await pool.query("DELETE FROM purchase_intents WHERE user_id = ANY($1::uuid[])", [userIds]);
@@ -222,6 +235,79 @@ async function cleanup() {
   for (const h of ["/courses", "/activity", '"/org"', "/agent", "/cart"]) assert.ok(!adminNav.includes(h.startsWith('"') ? `href=${h}` : `href="${h}`), `admin navbar has no ${h}`);
   assert.ok(userNav.includes('href="/courses"') && !userNav.includes('href="/admin'), "learner navbar unchanged, no admin links");
   console.log("[ok] admin: own navbar (dashboard, users, pricing, reconciliation, organizations, guides, assistant log); login -> /admin; shopper pages -> /admin, shopper actions 403; guides and /org/<id> open; learners unchanged");
+
+  // ------------------------------------------------------------ organizations (ADR-023)
+  const mgr = await newUser("orgmgr");
+  const holder = await newUser("orgseat");
+  const outsider = await newUser("orgnone");
+  const mc = cookieOf(mgr), hc = cookieOf(holder), oc = cookieOf(outsider);
+  let page = (await send("GET", "/org", { cookie: mc, hx: false })).text;
+  assert.match(page, /You are not part of an organization/);
+  assert.match(page, /Request an organization/);
+  assert.ok(!page.includes("/org/seats/checkout"), "no buy form before approval");
+  const orgName = `Sec Org ${randomUUID().slice(0, 8)}`;
+  r = await send("POST", "/org/request", { form: { name: orgName }, cookie: mc });
+  assert.equal(r.status, 200);
+  const request = (await pool.query("SELECT * FROM org_requests WHERE user_id=$1", [mgr.id])).rows[0];
+  assert.equal(request.status, "PENDING");
+  assert.match((await send("POST", "/org/request", { form: { name: `${orgName} 2` }, cookie: mc })).text, /already have a request waiting/);
+  assert.match((await send("POST", "/org/request", { form: { name: orgName.toUpperCase() }, cookie: oc })).text, /already taken or requested/);
+  page = (await send("GET", "/org", { cookie: mc, hx: false })).text;
+  assert.ok(page.includes(orgName) && page.includes("Waiting for approval") && !page.includes("/org/seats/checkout"), "pending: status shown, no buy form");
+  assert.equal((await send("POST", "/org/request", { form: { name: "Admin Org" }, cookie: ack })).status, 403, "the admin can't request");
+  for (const [c, who] of [[mc, "requester"], [oc, "learner"]]) {
+    assert.equal((await send("POST", `/admin/orgs/requests/${request.id}/approve`, { cookie: c })).status, 403, `${who} cannot approve`);
+    assert.equal((await send("POST", `/admin/orgs/requests/${request.id}/reject`, { cookie: c })).status, 403, `${who} cannot reject`);
+  }
+  page = (await send("GET", "/admin/orgs", { cookie: ack, hx: false })).text;
+  assert.ok(page.includes(orgName) && page.includes(mgr.email) && page.includes(`/admin/orgs/requests/${request.id}/approve`), "admin sees the request");
+  assert.ok(!page.includes('hx-post="/admin/orgs"') && !page.includes("Add manager"), "the admin no longer creates organizations or edits managers");
+  r = await send("POST", `/admin/orgs/requests/${request.id}/approve`, { cookie: ack });
+  assert.equal(r.status, 200);
+  const org = (await pool.query("SELECT o.* FROM organizations o JOIN org_requests q ON q.org_id=o.id WHERE q.id=$1", [request.id])).rows[0];
+  assert.ok(org && org.name === orgName, "approval created the organization");
+  orgIds.push(org.id);
+  assert.match((await send("POST", `/admin/orgs/requests/${request.id}/approve`, { cookie: ack })).text, /already approved/);
+
+  // Manager: runs the organization (buys and assigns seats); managers are read-only.
+  page = (await send("GET", "/org", { cookie: mc, hx: false })).text;
+  assert.ok(page.includes(orgName) && page.includes(`name="orgId" value="${org.id}"`), "approved requester sees the organization and the buy form");
+  assert.ok(page.includes("Managers") && !/Add manager|\/managers\//.test(page), "managers shown, not editable");
+  const buyKey = /name="checkoutKey" value="([0-9a-f-]{36})"/.exec(page)[1];
+  r = await send("POST", "/org/seats/checkout", { form: { orgId: org.id, courseId: course.id, seats: "1", provider: "mock", checkoutKey: buyKey }, cookie: mc });
+  assert.match(r.redirect || "", /^http:\/\/mock\.test\/pay\/.*back=org/, "manager is sent to pay");
+  r = await send("POST", "/org/seats/checkout", { form: { orgId: org.id, courseId: course.id, seats: "1", provider: "mock", checkoutKey: randomUUID() }, cookie: oc });
+  assert.ok(!r.redirect && /Only a manager/.test(r.text), "a non-manager cannot buy seats for it");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM orders WHERE user_id=$1", [outsider.id])).rows[0].n, 0, "no order for the non-manager");
+  const seatPool = (await pool.query("SELECT id FROM org_seat_pools WHERE org_id=$1", [org.id])).rows[0];
+  await pool.query("UPDATE org_seat_pools SET status='ACTIVE' WHERE id=$1", [seatPool.id]); // as if the payment webhook arrived
+  assert.equal((await send("POST", `/org/pools/${seatPool.id}/assign`, { form: { email: holder.email }, cookie: oc })).status, 404, "a non-manager cannot assign seats");
+  await send("POST", `/org/pools/${seatPool.id}/assign`, { form: { email: holder.email }, cookie: mc });
+  assert.equal(engine.decisions.evaluateAccess(holder.id, course.id).grantedVia, "SEAT_ASSIGNED", "the manager assigned a seat");
+
+  // Seat holder: sees which organization gives which course, nothing to manage; still a learner.
+  page = (await send("GET", "/org", { cookie: hc, hx: false })).text;
+  assert.ok(page.includes("Your organization seats") && page.includes(orgName) && page.includes(course.name || course.id), "seat holder sees organization and course");
+  assert.ok(!/Assign seat|Unassign|Refund this seat pack|name="orgId"/.test(page), "seat holder gets no management controls");
+  assert.equal((await send("GET", `/org/${org.id}`, { cookie: hc, hx: false })).location, "/org", "seat holder cannot open the management page");
+  assert.equal((await send("POST", `/org/pools/${seatPool.id}/assign`, { form: { email: outsider.email }, cookie: hc })).status, 404);
+  assert.ok(page.includes('href="/courses"') && page.includes('href="/cart"'), "a seat holder keeps the learner navbar (still shops for themselves)");
+
+  // Admin: looks only. No seat or refund actions, no buy form.
+  page = (await send("GET", `/org/${org.id}`, { cookie: ack, hx: false })).text;
+  assert.ok(page.includes("read-only") && page.includes(holder.email), "admin sees the organization and its seats");
+  assert.ok(!/Assign seat|Unassign|Refund this seat pack|name="orgId"/.test(page), "no actions for the admin");
+  assert.equal((await send("POST", `/org/pools/${seatPool.id}/assign`, { form: { email: outsider.email }, cookie: ack })).status, 404, "the admin can't assign seats");
+  assert.equal((await send("POST", `/org/pools/${seatPool.id}/refund`, { cookie: ack })).status, 404, "the admin can't refund a pack");
+
+  // Rejected request: nothing created, the learner sees why and can ask again.
+  r = await send("POST", "/org/request", { form: { name: `Sec Rejected ${randomUUID().slice(0, 6)}` }, cookie: oc });
+  const rejected = (await pool.query("SELECT * FROM org_requests WHERE user_id=$1 AND status='PENDING'", [outsider.id])).rows[0];
+  await send("POST", `/admin/orgs/requests/${rejected.id}/reject`, { form: { reason: "no team details" }, cookie: ack });
+  page = (await send("GET", "/org", { cookie: oc, hx: false })).text;
+  assert.ok(/was not approved: no team details/.test(page) && page.includes("Request an organization") && !page.includes("/org/seats/checkout"), "rejected: reason shown, can ask again");
+  assert.equal((await pool.query("SELECT org_id FROM org_requests WHERE id=$1", [rejected.id])).rows[0].org_id, null);
+  console.log("[ok] organizations: a learner requests, only the admin approves / rejects (admin can't request); the requester then manages it (buys, assigns); the admin only looks; seat holders see their organization and course and stay learners; a rejection shows its reason");
 
   // ------------------------------------------------------------ errors and malformed ids
   console.error = () => {};

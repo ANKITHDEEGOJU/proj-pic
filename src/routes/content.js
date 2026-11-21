@@ -138,7 +138,7 @@ router.get('/courses/:slug/doc', requireAuth, async (req, res, next) => {
         ${back}
       </div>
       ${adminPreview ? '' : `<!-- Re-checks access while the guide is open; reloads it (showing why) when access ends. -->
-      <div hx-get="/courses/${esc(slug)}/doc/status" hx-trigger="every 30s" hx-swap="none"></div>`}
+      <div hx-get="/courses/${esc(slug)}/doc/status" hx-trigger="every 5s, visibilitychange[document.visibilityState=='visible'] from:document" hx-swap="none"></div>`}
       <article class="card course-doc" style="overflow-wrap:anywhere">
         <style>.course-doc pre{overflow-x:auto;background:#f6f7f9;padding:0.75rem;border-radius:6px;font-size:0.85rem}
           .course-doc code{font-size:0.9em}.course-doc h2{margin-top:0}
@@ -151,6 +151,7 @@ router.get('/courses/:slug/doc', requireAuth, async (req, res, next) => {
 });
 
 router.get('/courses/:slug/doc/status', requireAuth, (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const { catalog, decisions } = req.app.locals.engine;
   const c = findCourse(catalog, req.params.slug);
   const allowed = c && docs.isPublished(c.id) && decisions.evaluateAccess(req.user.id, c.slug || c.id).allowed;

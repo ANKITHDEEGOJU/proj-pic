@@ -1,12 +1,12 @@
 "use strict";
 // LEARNX Assistant (M7 AI agent) checks against Postgres, with a FAKE model: a local
-// OpenAI-compatible server that answers with scripted tool calls. No Groq/Gemini key or
+// OpenAI-compatible server that answers with scripted tool calls. No Groq key or
 // network is needed and the results are the same every run.
 //   - full cycle: list_courses -> propose_purchase -> (user approves) -> execute_purchase -> PAID
 //   - the assistant is an ordinary agent: own agent key, catalog price, can't execute before
 //     approval, approval token never reaches the model or the chat history
 //   - bad tool arguments / unknown course / unknown tool come back as errors, not crashes
-//   - provider fallback (Groq rate-limited -> Gemini), daily message limit, not configured
+//   - Groq rate-limited -> MODEL_BUSY, daily message limit, not configured
 //   - HTTP: POST /assistant/chat answers 200 with the chat fragment
 // Payment is stubbed. Removes its own rows at the end; its @test.local users stay.
 require("dotenv").config();
@@ -25,7 +25,7 @@ const agent = require("../src/services/agentPurchase");
 
 // The assistant reads its model settings from the environment on every call: point it at
 // the fake model only, whatever .env says.
-for (const k of ["LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "GROQ_API_KEY", "GEMINI_API_KEY", "GROQ_BASE_URL", "GEMINI_BASE_URL", "ASSISTANT_MESSAGES_PER_DAY"])
+for (const k of ["LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "GROQ_API_KEY", "GROQ_BASE_URL", "ASSISTANT_MESSAGES_PER_DAY"])
   delete process.env[k];
 const assistant = require("../src/services/assistant");
 
@@ -324,16 +324,12 @@ const findIntentId = (msgs) => {
   // ------------------------------------------------------------ provider fallback
   delete process.env.LLM_BASE_URL;
   const busy = await fakeModel(() => ({ status: 429 }));
-  const backup = await fakeModel(() => ({ text: "Hello from the backup model." }));
-  Object.assign(process.env, { GROQ_API_KEY: "fake", GROQ_BASE_URL: busy.url, GEMINI_API_KEY: "fake", GEMINI_BASE_URL: backup.url });
-  const rf = await say(ub, "hello");
-  assert.match(rf.provider, /^gemini\//);
-  assert.equal(rf.reply, "Hello from the backup model.");
-  delete process.env.GEMINI_API_KEY;
+  Object.assign(process.env, { GROQ_API_KEY: "fake", GROQ_BASE_URL: busy.url });
   await assert.rejects(say(ub, "hello"), (e) => e.code === "MODEL_BUSY");
-  console.log("[ok] Groq rate-limited -> Gemini answers; with no backup -> MODEL_BUSY");
+  console.log("[ok] Groq rate-limited -> MODEL_BUSY");
 
   // ------------------------------------------------------------ daily message limit
+  const backup = await fakeModel(() => ({ text: "Hello." }));
   process.env.LLM_BASE_URL = backup.url;
   process.env.ASSISTANT_MESSAGES_PER_DAY = "2";
   const uq = await newUser("quota");

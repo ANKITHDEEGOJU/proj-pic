@@ -1,7 +1,7 @@
 'use strict';
 // M7: LEARNX Assistant - a real AI agent inside the app.
 //
-// The user chats on /agent. The model (Groq by default, Gemini as an optional fallback, or any
+// The user chats on /agent. The model (Groq, or any
 // OpenAI-compatible API) decides which tools to call; the tools run here, on the server, as the
 // signed-in user. The assistant is an ordinary *agent* to the purchase system: it has its own
 // agent key (name "learnx-assistant") and goes through exactly the same checks as any outside
@@ -44,20 +44,18 @@ const MESSAGES_PER_DAY = () => num('ASSISTANT_MESSAGES_PER_DAY', 30);
 
 const PRESETS = {
   groq: { baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', modelEnv: 'GROQ_MODEL', model: 'openai/gpt-oss-120b' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', keyEnv: 'GEMINI_API_KEY', modelEnv: 'GEMINI_MODEL', model: 'gemini-2.5-flash' },
 };
 
 // A setting copied with a trailing comment ("llama-3.3-70b-versatile   (any model...)") still works.
 const firstWord = (v) => String(v || '').trim().split(/\s+/)[0] || '';
 
-// Providers to try, in order. LLM_BASE_URL (+ LLM_API_KEY, LLM_MODEL) points at any other
+// The provider to use: Groq. LLM_BASE_URL (+ LLM_API_KEY, LLM_MODEL) points at any other
 // OpenAI-compatible server instead (Ollama, OpenRouter, a test fake).
 function providers() {
   if (process.env.LLM_BASE_URL) {
     return [{ name: 'custom', baseUrl: process.env.LLM_BASE_URL.replace(/\/$/, ''), key: firstWord(process.env.LLM_API_KEY), model: firstWord(process.env.LLM_MODEL) || 'default' }];
   }
-  const first = PRESETS[process.env.LLM_PROVIDER] ? process.env.LLM_PROVIDER : 'groq';
-  return [first, ...Object.keys(PRESETS).filter((n) => n !== first)]
+  return Object.keys(PRESETS)
     .map((name) => ({ name, ...PRESETS[name], baseUrl: process.env[`${name.toUpperCase()}_BASE_URL`] || PRESETS[name].baseUrl,
       key: firstWord(process.env[PRESETS[name].keyEnv]), model: firstWord(process.env[PRESETS[name].modelEnv]) || PRESETS[name].model }))
     .filter((p) => p.key);

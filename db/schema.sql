@@ -523,3 +523,62 @@ ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS list_amount_cents INT CHEC
 ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS discount_cents INT NOT NULL DEFAULT 0 CHECK (discount_cents >= 0);
 ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS coupon_code TEXT;
 ALTER TABLE purchase_intents ADD COLUMN IF NOT EXISTS coupon_rule_id UUID;
+
+-- -----------------------------------------------------------------------------
+-- Admin-provisioned organizations (2026-11-21, ADR-023)
+-- -----------------------------------------------------------------------------
+-- Organizations are created by a platform admin, who names their managers by email. Managers
+-- buy seat packs and assign seats; seat holders only see which organization they belong to.
+-- owner_user_id is kept for organizations created before this change (the buyer); new ones
+-- have none, and one person may manage several organizations.
+ALTER TABLE organizations ALTER COLUMN owner_user_id DROP NOT NULL;
+ALTER TABLE organizations DROP CONSTRAINT IF EXISTS organizations_owner_user_id_key;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS created_by TEXT;
+
+-- A manager is named by email, so the admin can add someone who has not signed up yet; the
+-- row matches the account with that email (case-insensitive). Removing a manager keeps the row
+-- (removed_at / removed_by) as the audit trail; seats they assigned are not touched.
+CREATE TABLE IF NOT EXISTS org_managers (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  email       TEXT NOT NULL CHECK (email = lower(email) AND length(email) BETWEEN 3 AND 254),
+  added_by    TEXT NOT NULL,
+  added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  removed_by  TEXT,
+  removed_at  TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_org_managers_active ON org_managers (org_id, email) WHERE removed_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_org_managers_email ON org_managers (email) WHERE removed_at IS NULL;
+
+-- Existing organizations: their owner (the buyer) becomes the first manager. Runs once per org.
+INSERT INTO org_managers (org_id, email, added_by)
+SELECT o.id, lower(u.email), 'migration:owner'
+  FROM organizations o JOIN users u ON u.id = o.owner_user_id
+ WHERE NOT EXISTS (SELECT 1 FROM org_managers m WHERE m.org_id = o.id);
+
+-- Organization requests (2026-11-21, ADR-023 revised): a learner asks for an organization; the
+-- platform admin approves (the organization is created with the requester as its manager) or
+-- rejects it. Decided requests are kept as the audit trail.
+CREATE TABLE IF NOT EXISTS org_requests (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID NOT NULL REFERENCES users(id),
+  org_name     TEXT NOT NULL CHECK (length(trim(org_name)) BETWEEN 1 AND 120),
+  status       TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at   TIMESTAMPTZ,
+  decided_by   TEXT,
+  reason       TEXT,
+  org_id       UUID REFERENCES organizations(id) ON DELETE SET NULL
+);
+-- One open request per learner at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_org_requests_pending ON org_requests (user_id) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS ix_org_requests_status ON org_requests (status, created_at);
+
+-- Clean-up: the saved-card experiment (card mandates for automatic renewal) was removed; Razorpay
+-- test accounts don't offer mandates (ADR-013). Drop what it left in older databases.
+ALTER TABLE purchase_intents DROP COLUMN IF EXISTS payment_method_id;
+ALTER TABLE purchase_intents DROP COLUMN IF EXISTS pay_method;
+ALTER TABLE purchase_intents DROP COLUMN IF EXISTS charge_amount_cents;
+ALTER TABLE purchase_intents DROP COLUMN IF EXISTS charge_currency;
+ALTER TABLE purchase_intents DROP COLUMN IF EXISTS fx_rate;
+DROP TABLE IF EXISTS saved_payment_methods;

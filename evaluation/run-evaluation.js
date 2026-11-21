@@ -213,8 +213,9 @@ const SCENARIOS = [
       // 6, not 10: with 10 simultaneous assignments the app ran out of database connections
       // and froze (known defect, see evaluation/README.md). 6 stays below the pool of 10.
       const members = await Promise.all(Array.from({ length: 6 }, () => newUser('member')));
-      const pack = await seats.createSeatPackOrder({ userId: owner.id, orgName: `Eval Org ${randomUUID().slice(0, 4)}`, course, seats: 1, provider: PROVIDER });
-      orgIds.push(pack.org.id);
+      const org = await seats.createOrg({ name: `Eval Org ${randomUUID().slice(0, 8)}`, managerEmails: owner.email, actor: 'eval' });
+      orgIds.push(org.id);
+      const pack = await seats.createSeatPackOrder({ userId: owner.id, orgId: org.id, course, seats: 1, provider: PROVIDER });
       await deliver(captured(payment(pack.orderId, owner, course.priceCents)));
       await Promise.all(members.map((m) => seats.assignSeat({ ledger: engine.ledger, poolId: pack.pool.id, email: m.email, actor: `user:${owner.id}` }).catch(() => null)));
       const sysInUse = (await seats.activeSeats(pack.pool.id)).length;

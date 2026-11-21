@@ -26,8 +26,9 @@ function requireAdmin(req, res, next) {
 // GET /admin - Admin Overview Dashboard
 router.get('/admin', requireAdmin, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT COUNT(*) FROM users');
-    const userCount = rows[0].count;
+    const users = await countUsers();
+    const waitingOrgs = (await pool.query("SELECT count(*)::int n FROM org_requests WHERE status='PENDING'")).rows[0].n;
+    const userCount = `${users.real}${users.test ? `; ${users.test} automated-test accounts hidden` : ''}`;
 
     const body = `
       <h2>Admin Panel</h2>
@@ -45,8 +46,8 @@ router.get('/admin', requireAdmin, async (req, res) => {
 
         <div class="card">
           <h3>Organizations & Seats</h3>
-          <p style="color: #5B5F6E; margin-bottom: 1rem;">Every organization, its seat packs and who holds each seat.</p>
-          <a href="/admin/orgs"><button class="alt">View Organizations →</button></a>
+          <p style="color: #5B5F6E; margin-bottom: 1rem;">Approve or reject organization requests; see every organization, its seat packs and who holds each seat.${waitingOrgs ? ` <strong style="color:#8a4b00">${waitingOrgs} request${waitingOrgs === 1 ? '' : 's'} waiting.</strong>` : ''}</p>
+          <a href="/admin/orgs"><button class="alt">${waitingOrgs ? 'Review Requests →' : 'View Organizations →'}</button></a>
         </div>
 
         <div class="card">
@@ -85,18 +86,31 @@ router.get('/admin', requireAdmin, async (req, res) => {
 // ---- admin user list (paged + searchable) ---------------------------------------------------
 
 // One page of users matching q (email or id), newest first, as table rows + "Show more".
-async function adminUserRows(engine, { q = '', offset = 0 } = {}) {
+// Accounts made by the automated suites and the evaluation all use @test.local. They can't be
+// deleted (their ledger rows are append-only), so the admin pages count and list them apart.
+const TEST_EMAIL_LIKE = '%@test.local';
+async function countUsers() {
+  const { rows } = await pool.query(
+    `SELECT count(*) FILTER (WHERE email NOT ILIKE $1)::int AS real, count(*) FILTER (WHERE email ILIKE $1)::int AS test FROM users`,
+    [TEST_EMAIL_LIKE]
+  );
+  return rows[0];
+}
+
+async function adminUserRows(engine, { q = '', offset = 0, tests = false } = {}) {
   const { catalog, projection } = engine;
   const needle = String(q).trim().slice(0, 100);
   const like = `%${needle.replace(/[\\%_]/g, '\\$&')}%`;
+  // The plain list hides test accounts unless asked (?tests=1); a search looks at every account.
+  const where = `($1 = '' OR email ILIKE $2 OR id::text ILIKE $2) AND ($3::boolean OR $1 <> '' OR email NOT ILIKE '${TEST_EMAIL_LIKE}')`;
   const { rows: users } = await pool.query(
     `SELECT id, email, created_at, count(*) OVER () AS total FROM users
-      WHERE $1 = '' OR email ILIKE $2 OR id::text ILIKE $2
-      ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
-    [needle, like, PAGE_SIZE, offset]
+      WHERE ${where}
+      ORDER BY created_at DESC LIMIT $4 OFFSET $5`,
+    [needle, like, tests, PAGE_SIZE, offset]
   );
   const total = users.length ? Number(users[0].total)
-    : Number((await pool.query(`SELECT count(*) FROM users WHERE $1 = '' OR email ILIKE $2 OR id::text ILIKE $2`, [needle, like])).rows[0].count);
+    : Number((await pool.query(`SELECT count(*) FROM users WHERE ${where}`, [needle, like, tests])).rows[0].count);
   const projectionSnapshot = projection.snapshot();
   const allProducts = catalog.list ? catalog.list() : [];
   const productOptions = allProducts.map(p => `
@@ -114,26 +128,27 @@ async function adminUserRows(engine, { q = '', offset = 0 } = {}) {
             const title = p ? (p.name || p.title) : ent.productId;
             const isSub = ent.type === 'SUBSCRIPTION';
 
+            // One row per entitlement: the title wraps on the left, Revoke keeps its size on the right.
             return `
-              <div style="display: inline-flex; align-items: center; gap: 0.5rem; background: #e8f5e9; border: 1px solid #a5d6a7; padding: 0.25rem 0.6rem; border-radius: 20px; font-size: 0.8rem; margin: 0.2rem 0.3rem 0.2rem 0;">
-                <span style="color: #1b5e20; font-weight: 600;">✓ ${esc(title)} ${isSub ? '(Sub)' : ''}</span>
-                <form action="/admin/users/revoke" method="POST" style="display: inline; margin: 0;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; background: #e8f5e9; border: 1px solid #a5d6a7; padding: 0.3rem 0.35rem 0.3rem 0.7rem; border-radius: 10px; font-size: 0.8rem;">
+                <span style="color: #1b5e20; font-weight: 600; line-height: 1.35; min-width: 0; overflow-wrap: anywhere;">✓ ${esc(title)}${isSub ? ' <small style="font-weight: 500; color: #33691e;">(pass)</small>' : ''}</span>
+                <form action="/admin/users/revoke" method="POST" style="margin: 0; flex-shrink: 0;">
                   <input type="hidden" name="userId" value="${esc(u.id)}">
                   <input type="hidden" name="productId" value="${esc(ent.productId)}">
-                  <button type="submit" title="Revoke Access" style="background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 0.2s;">
+                  <button type="submit" title="Revoke ${esc(title)}" style="white-space: nowrap; background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; cursor: pointer; box-shadow: none;">
                     Revoke
                   </button>
                 </form>
               </div>
             `;
           }).join('')
-        : '<span style="color: #888; font-size: 0.85rem; italic">No Active Access</span>';
+        : '<span style="color: #888; font-size: 0.85rem; font-style: italic;">No Active Access</span>';
 
       return `
         <tr>
           <td style="min-width: 11rem;"><strong>${esc(u.email)}</strong><br><small style="color:#666">ID: ${esc(u.id)}</small></td>
           <td><small>${new Date(u.created_at).toLocaleDateString()}</small></td>
-          <td style="vertical-align: middle;">${entitlementBadges}</td>
+          <td style="vertical-align: middle; min-width: 16rem;"><div style="display: flex; flex-direction: column; gap: 0.4rem;">${entitlementBadges}</div></td>
           <td>
             <form action="/admin/users/grant" method="POST" onsubmit="this.querySelector('button[type=submit]').disabled = true" style="display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
               <input type="hidden" name="userId" value="${esc(u.id)}">
@@ -154,16 +169,17 @@ async function adminUserRows(engine, { q = '', offset = 0 } = {}) {
       `;
     }).join('');
   const shown = offset + users.length;
-  return html + moreRow({ colspan: 4, nextUrl: `/admin/users/rows?${qs({ q: needle, offset: shown })}`, shown, total, q: needle });
+  return html + moreRow({ colspan: 4, nextUrl: `/admin/users/rows?${qs({ q: needle, offset: shown, tests: tests ? '1' : '' })}`, shown, total, q: needle });
 }
 
 // GET /admin/users - User Entitlements Management
 router.get('/admin/users', requireAdmin, async (req, res) => {
   try {
-    const userCount = Number((await pool.query('SELECT count(*) FROM users')).rows[0].count);
+    const users = await countUsers();
+    const tests = req.query.tests === '1';
     const body = `
       <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-        <h2>User Management (${userCount} Users)</h2>
+        <h2>User Management (${tests ? users.real + users.test : users.real} Users)</h2>
         <a href="/admin"><button class="alt">← Back to Admin Overview</button></a>
       </div>
 
@@ -174,7 +190,10 @@ router.get('/admin/users', requireAdmin, async (req, res) => {
         </p>
       </div>
 
-      ${searchBox({ url: '/admin/users/rows', target: '#user-rows', placeholder: 'Search by email or user id…' })}
+      ${users.test ? `<p style="color:#5B5F6E;font-size:0.85rem;margin:0 0 0.5rem;">${tests
+        ? `Showing ${users.real} users and ${users.test} automated-test accounts (<code>@test.local</code>). <a href="/admin/users">Hide test accounts</a>`
+        : `${users.test} automated-test accounts (<code>@test.local</code>, made by <code>npm run verify</code> and the evaluation) are hidden from the list; search finds them. <a href="/admin/users?tests=1">Show them</a>`}</p>` : ''}
+      ${searchBox({ url: `/admin/users/rows${tests ? '?tests=1' : ''}`, target: '#user-rows', placeholder: 'Search by email or user id…' })}
       <div class="table-wrap"><table>
         <thead>
           <tr>
@@ -185,7 +204,7 @@ router.get('/admin/users', requireAdmin, async (req, res) => {
           </tr>
         </thead>
         <tbody id="user-rows">
-          ${await adminUserRows(req.app.locals.engine)}
+          ${await adminUserRows(req.app.locals.engine, { tests })}
         </tbody>
       </table></div>
     `;
@@ -201,7 +220,7 @@ router.get('/admin/users', requireAdmin, async (req, res) => {
 router.get('/admin/users/rows', requireAdmin, async (req, res) => {
   try {
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    res.send(await adminUserRows(req.app.locals.engine, { q: req.query.q || '', offset }));
+    res.send(await adminUserRows(req.app.locals.engine, { q: req.query.q || '', offset, tests: req.query.tests === '1' }));
   } catch (err) {
     console.error('Error loading admin user rows:', err);
     res.status(500).send('<tr><td colspan="4" class="err">Could not load users.</td></tr>');

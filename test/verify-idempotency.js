@@ -20,6 +20,7 @@ const { attachUser } = require("../src/auth");
 
 process.env.MOCK_PROVIDER_URL = "http://mock.test"; // checkout links only; nothing is called
 const userIds = [];
+const orgIds = [];
 let server;
 
 async function cleanup() {
@@ -27,7 +28,10 @@ async function cleanup() {
   if (!userIds.length) return;
   const orders = (await pool.query("SELECT id FROM orders WHERE user_id = ANY($1::uuid[])", [userIds])).rows.map((r) => r.id);
   await pool.query("DELETE FROM org_seat_pools WHERE order_id = ANY($1::uuid[])", [orders]);
-  await pool.query("DELETE FROM organizations WHERE owner_user_id = ANY($1::uuid[])", [userIds]);
+  if (orgIds.length) {
+    await pool.query("DELETE FROM org_seat_pools WHERE org_id = ANY($1::uuid[])", [orgIds]);
+    await pool.query("DELETE FROM organizations WHERE id = ANY($1::uuid[])", [orgIds]);
+  }
   await pool.query("DELETE FROM order_line_items WHERE order_id = ANY($1::uuid[])", [orders]);
   await pool.query("DELETE FROM orders WHERE id = ANY($1::uuid[])", [orders]);
   await pool.query("DELETE FROM cart_items WHERE user_id = ANY($1::uuid[])", [userIds]);
@@ -108,13 +112,15 @@ async function cleanup() {
 
   // ------------------------------------------------------------ seat-pack checkout
   const owner = await newUser("seats");
+  const idemOrg = await require("../src/services/seats").createOrg({ name: `Idem Org ${randomUUID().slice(0, 6)}`, managerEmails: owner.email, actor: "test:idem" });
+  orgIds.push(idemOrg.id);
   const orgPage = await get(owner, "/org");
   const sk = keyIn(orgPage, "checkoutKey");
   assert.ok(sk, "the seat form carries a one-time key");
-  const seatForm = { orgName: "Idem Org", courseId: course.id, seats: "2", provider: "mock", checkoutKey: sk };
+  const seatForm = { orgId: keyIn(orgPage, "orgId"), courseId: course.id, seats: "2", provider: "mock", checkoutKey: sk };
   const seatBurst = await Promise.all([1, 2, 3].map(() => post(owner, "/org/seats/checkout", seatForm)));
   assert.equal((await ordersOf(owner)).length, 1, "one seat order");
-  const packs = (await pool.query("SELECT p.id FROM org_seat_pools p JOIN organizations o ON o.id=p.org_id WHERE o.owner_user_id=$1", [owner.id])).rows;
+  const packs = (await pool.query("SELECT p.id FROM org_seat_pools p WHERE p.org_id=$1", [idemOrg.id])).rows;
   assert.equal(packs.length, 1, "one seat pack");
   const seatUrls = seatBurst.map((r) => r.redirect);
   assert.ok(seatUrls.every((u) => u && u === seatUrls[0] && /back=org/.test(u)), "same checkout page (back to /org) for every repeat");
@@ -134,7 +140,7 @@ async function cleanup() {
   org = await get(owner, "/org");
   assert.doesNotMatch(org, /Payment cancelled<\/span>/, "old unpaid checkout not listed");
   assert.match(org, /No seat packs yet/);
-  assert.equal((await pool.query("SELECT count(*)::int n FROM org_seat_pools p JOIN organizations o ON o.id=p.org_id WHERE o.owner_user_id=$1", [owner.id])).rows[0].n, 1, "the pack row is kept");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM org_seat_pools p WHERE p.org_id=$1", [idemOrg.id])).rows[0].n, 1, "the pack row is kept");
   console.log("[ok] seat pack whose checkout was cancelled: a short notice that fades out (no 'Waiting for payment' / 'paid'); after a while it is no longer listed (row kept)");
 
   // ------------------------------------------------------------ admin grant
@@ -155,6 +161,22 @@ async function cleanup() {
   await post(admin, "/admin/users/grant", { ...grant, grantKey: randomUUID() });
   assert.equal((await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE user_id=$1 AND event_type='MANUAL_GRANT'", [student.id])).rows[0].n, 2);
   console.log("[ok] admin grant: the same form sent 4x (3 at once) -> one MANUAL_GRANT, one pass period added; a new form -> a second grant");
+
+  // ------------------------------------------------------------ admin user count
+  // Automated-test accounts (@test.local) can't be deleted (append-only ledger), so the admin
+  // pages count and list real users apart from them.
+  const counts = (await pool.query("SELECT count(*) FILTER (WHERE email NOT ILIKE '%@test.local')::int AS real, count(*)::int AS all FROM users")).rows[0];
+  const listPage = await get(admin, "/admin/users");
+  assert.match(listPage, new RegExp(`User Management \\(${counts.real} Users\\)`), "the heading counts real users only");
+  assert.match(listPage, /automated-test accounts .* are hidden from the list/);
+  assert.ok(!listPage.includes(owner.email), "test accounts are not listed by default");
+  assert.match(await get(admin, "/admin"), new RegExp(`registered users \\(${counts.real}; \\d+ automated-test accounts hidden\\)`));
+  const withTests = await get(admin, "/admin/users?tests=1");
+  assert.match(withTests, new RegExp(`User Management \\(${counts.all} Users\\)`), "with ?tests=1 every account counts");
+  assert.ok(withTests.includes("Hide test accounts"));
+  assert.ok((await get(admin, `/admin/users/rows?q=${encodeURIComponent(owner.email)}`)).includes(owner.email), "a search finds a test account by its email");
+  assert.match(listPage + withTests, /white-space: nowrap[^>]*>\s*Revoke/, "Revoke never wraps");
+  console.log("[ok] admin users: real users counted and listed apart from automated-test accounts (shown with ?tests=1; a search finds every account); Revoke stays on one line");
 
   console.log("\nIDEMPOTENCY CHECKS PASSED");
 })()

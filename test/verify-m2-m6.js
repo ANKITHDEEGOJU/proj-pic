@@ -320,6 +320,36 @@ registry[PROVIDER] = fake; // so the retry worker can resolve inbox rows of this
   assert.deepEqual(await issuesFor(I.orderId, "RESOLVED"), ["REFUND_FAILED"]);
   console.log("[ok] M6 an issue that disappears (REFUND_FAILED fixed) is auto-resolved");
 
+  // Refund webhook late (Razorpay test mode sometimes sends it ~15 min after the refund): an order
+  // REFUND_PENDING for longer than refundCheckSeconds is confirmed with the provider directly.
+  const quick = new Reconciler({ ledger, adapters: { [PROVIDER]: fake }, refundCheckSeconds: 90, log: quiet });
+  const pendingSince = async (o, secondsAgo) => {
+    await processor.process(await inbox(captured(o.pay), `payment.captured:${o.pay.id}`), fake);
+    await pool.query("UPDATE orders SET status='REFUND_PENDING', updated_at=now() - make_interval(secs => $2) WHERE id=$1", [o.orderId, secondsAgo]);
+  };
+  const refundsIn = async (pay) => (await pool.query("SELECT count(*)::int n FROM commerce_ledger WHERE event_type='REFUND' AND payment_info->>'providerPaymentId'=$1", [pay.id])).rows[0].n;
+  const L = await newOrder(); const Lr = refundOf(L.pay, 120e3); // refunded 2 min ago, webhook not here
+  await pendingSince(L, 120); atProvider(L.pay, Lr);
+  const M = await newOrder(); // pending 2 min, provider has no refund yet
+  await pendingSince(M, 120); atProvider(M.pay);
+  const N = await newOrder(); const Nr = refundOf(N.pay, 10e3); // only 10 s: its webhook is probably on its way
+  await pendingSince(N, 10); atProvider(N.pay, Nr);
+  const q1 = await quick.confirmPendingRefunds({ trigger: "verify" });
+  assert.equal(q1.fixed, 1, "one refund confirmed");
+  assert.equal(await orderStatus(L.orderId), "REFUNDED");
+  assert.equal(await refundsIn(L.pay), 2, "both lines of the order refunded in the ledger (access ends)");
+  assert.deepEqual(await issuesFor(Lr.id, "AUTO_FIXED"), ["REFUND_CONFIRMED"]);
+  assert.equal(await orderStatus(M.orderId), "REFUND_PENDING", "no refund at the provider: left for the stuck-refund check");
+  assert.equal(await orderStatus(N.orderId), "REFUND_PENDING", "too recent: waits for the webhook");
+  assert.equal(await refundsIn(N.pay), 0);
+  const runsBefore = (await pool.query("SELECT count(*)::int n FROM recon_runs WHERE trigger='verify'")).rows[0].n;
+  const q2 = await quick.confirmPendingRefunds({ trigger: "verify" });
+  assert.equal(q2.fixed, 0, "nothing new");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM recon_runs WHERE trigger='verify'")).rows[0].n, runsBefore, "a check that applies nothing writes no run");
+  assert.equal((await processor.process(await inbox(refunded(L.pay, Lr), `refund.created:${Lr.id}`), fake)).outcome, "DUPLICATE", "the late real webhook is a duplicate");
+  for (const o of [M, N]) await pool.query("UPDATE orders SET status='COMPLETED' WHERE id=$1", [o.orderId]);
+  console.log("[ok] M6 late refund webhook: a refund pending > 90 s is confirmed with the provider and applied (order REFUNDED, REFUND events); no refund at the provider or too recent -> left alone; empty checks write no run; the late webhook is a duplicate");
+
   console.log("\nM2/M6 CHECKS PASSED");
   await cleanup();
   await pool.end();

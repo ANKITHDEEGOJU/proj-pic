@@ -26,6 +26,8 @@ const orgIds = [];
 
 async function cleanup() {
   await pool.query("DELETE FROM webhook_inbox WHERE provider=$1", [PROVIDER]);
+  // Organization requests of this script's users would otherwise show on /admin/orgs.
+  await pool.query("DELETE FROM org_requests WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'm4\\_%@test.local')");
   if (orgIds.length) {
     await pool.query("DELETE FROM org_seat_pools WHERE org_id = ANY($1::uuid[])", [orgIds]);
     await pool.query("DELETE FROM organizations WHERE id = ANY($1::uuid[])", [orgIds]);
@@ -71,8 +73,9 @@ async function cleanup() {
   const [a, b, c, d] = [await newUser("a"), await newUser("b"), await newUser("c"), await newUser("d")];
   const actor = `user:${owner.id}`;
 
-  const pack = await seats.createSeatPackOrder({ userId: owner.id, orgName: "M4 Test Org", course, seats: 2, provider: PROVIDER });
-  orgIds.push(pack.org.id);
+  const org = await seats.createOrg({ name: `M4 Test Org ${randomUUID().slice(0, 6)}`, managerEmails: owner.email, actor: "test:m4" });
+  orgIds.push(org.id);
+  const pack = await seats.createSeatPackOrder({ userId: owner.id, orgId: org.id, course, seats: 2, provider: PROVIDER });
   const poolId = pack.pool.id;
   assert.equal(pack.amount, course.price * 2, "price = seats x course price");
   await rejects(seats.assignSeat({ ledger, poolId, email: a.email, actor }), "POOL_NOT_ACTIVE");
@@ -98,7 +101,7 @@ async function cleanup() {
   console.log("[ok] M4 assign: seats give access; full pack, duplicate member and unknown email are refused");
 
   // Two owners clicking at once on the last seat: exactly one wins.
-  const pack1 = await seats.createSeatPackOrder({ userId: owner.id, course, seats: 1, provider: PROVIDER });
+  const pack1 = await seats.createSeatPackOrder({ userId: owner.id, orgId: org.id, course, seats: 1, provider: PROVIDER });
   await captured(paymentFor(pack1.orderId, owner, Math.round(course.price * 100)));
   const race = await Promise.allSettled([
     seats.assignSeat({ ledger, poolId: pack1.pool.id, email: c.email, actor }),
@@ -136,6 +139,62 @@ async function cleanup() {
   assert.equal(access(b).allowed, true);
   assert.equal(access(b).grantedVia, "PURCHASE_SUCCEEDED");
   console.log("[ok] M4 seat holder who also bought the course keeps access after unassignment");
+
+  // Organizations: a learner requests one, the admin approves it, the requester manages it (ADR-023).
+  const seatsBefore = (await seats.activeSeats(poolId)).length;
+  await rejects(seats.createOrg({ name: "No Managers", managerEmails: "", actor: "test:m4" }), "NO_MANAGER");
+  await rejects(seats.createOrg({ name: ` ${org.name.toUpperCase()} `, managerEmails: a.email, actor: "test:m4" }), "ORG_EXISTS");
+  await rejects(seats.createSeatPackOrder({ userId: a.id, orgId: org.id, course, seats: 1, provider: PROVIDER }), "NOT_MANAGER");
+  await rejects(seats.createSeatPackOrder({ userId: owner.id, orgId: "not-a-uuid", course, seats: 1, provider: PROVIDER }), "NOT_MANAGER");
+  await rejects(seats.createSeatPackOrder({ userId: owner.id, orgId: randomUUID(), course, seats: 1, provider: PROVIDER }), "NOT_MANAGER");
+  console.log("[ok] M4 organizations: need a manager; names are unique (case-insensitive); only a manager can buy seats");
+
+  const adminUser = { id: randomUUID(), email: (process.env.ADMIN_EMAIL || "admin@learnx.com").toUpperCase() };
+  await rejects(seats.requestOrg({ user: adminUser, name: "Admin Team" }), "ADMIN_EMAIL");
+  await rejects(seats.requestOrg({ user: c, name: "  " }), "BAD_ORG");
+  await rejects(seats.requestOrg({ user: c, name: org.name.toLowerCase() }), "ORG_EXISTS");
+  const reqName = `M4 Requested Org ${randomUUID().slice(0, 6)}`;
+  const orgReq1 = await seats.requestOrg({ user: c, name: reqName });
+  assert.equal(orgReq1.status, "PENDING");
+  await rejects(seats.requestOrg({ user: c, name: `${reqName} 2` }), "REQUEST_OPEN");
+  await rejects(seats.requestOrg({ user: d, name: reqName.toUpperCase() }), "ORG_EXISTS"); // name already requested
+  assert.equal((await seats.orgsManagedBy(c)).length, 0, "nothing to manage before approval");
+  const approved = await seats.approveRequest({ requestId: orgReq1.id, actor: "test:m4" });
+  orgIds.push(approved.org.id);
+  assert.equal(approved.org.name, reqName);
+  assert.equal(await seats.isManager(approved.org.id, { email: c.email.toUpperCase() }), true, "the requester manages it (email case-insensitive)");
+  await rejects(seats.approveRequest({ requestId: orgReq1.id, actor: "test:m4" }), "DECIDED");
+  await rejects(seats.rejectRequest({ requestId: orgReq1.id, actor: "test:m4" }), "DECIDED");
+  const cPack = await seats.createSeatPackOrder({ userId: c.id, orgId: approved.org.id, course, seats: 1, provider: PROVIDER });
+  assert.equal(cPack.org.id, approved.org.id, "the approved manager buys for their organization");
+  await rejects(seats.createSeatPackOrder({ userId: d.id, orgId: approved.org.id, course, seats: 1, provider: PROVIDER }), "NOT_MANAGER");
+  const orgReq2 = await seats.requestOrg({ user: d, name: `M4 Rejected ${randomUUID().slice(0, 6)}` });
+  await seats.rejectRequest({ requestId: orgReq2.id, actor: "test:m4", reason: "duplicate team" });
+  assert.equal((await seats.requestsOf(d.id))[0].reason, "duplicate team");
+  assert.equal((await seats.orgsManagedBy(d)).length, 0, "a rejected request creates nothing");
+  assert.ok(await seats.requestOrg({ user: d, name: `M4 Second Try ${randomUUID().slice(0, 6)}` }), "a rejected learner can ask again");
+  await pool.query("UPDATE org_requests SET status='REJECTED', decided_at=now() WHERE user_id=$1 AND status='PENDING'", [d.id]);
+  assert.equal((await seats.activeSeats(poolId)).length, seatsBefore, "requests and approvals don't touch seats");
+  console.log("[ok] M4 requests: learner asks (name free, one open request, admin can't), admin approves -> organization with the requester as manager (buys seats), or rejects with a reason (nothing created, can ask again); decided once");
+
+  // Concurrent approval of the same request: exactly one organization.
+  const raceName = `M4 Race Org ${randomUUID().slice(0, 6)}`;
+  const orgReq3 = await seats.requestOrg({ user: b, name: raceName });
+  const both = await Promise.allSettled([1, 2].map(() => seats.approveRequest({ requestId: orgReq3.id, actor: "test:m4" })));
+  assert.equal(both.filter((x) => x.status === "fulfilled").length, 1);
+  const raceOrgs = (await pool.query("SELECT id FROM organizations WHERE name=$1", [raceName])).rows;
+  assert.equal(raceOrgs.length, 1, "one organization for two clicks");
+  orgIds.push(raceOrgs[0].id);
+  const managed = (await seats.orgsManagedBy(owner)).map((o) => o.id);
+  assert.ok(managed.includes(org.id));
+  console.log("[ok] M4 approving the same request twice at once creates one organization");
+
+  // A seat holder sees which organization gives them which course (from the ledger).
+  const holder = (await seats.activeSeats(poolId))[0];
+  const held = await seats.seatsHeldBy(holder.user_id);
+  assert.ok(held.some((h) => h.org_id === org.id && h.org_name === org.name && h.course_id === course.id));
+  assert.equal((await seats.seatsHeldBy(a.id)).some((h) => h.org_id === org.id), false, "an unassigned member holds no seat");
+  console.log("[ok] M4 seat holders: their organization and course are read from the ledger; unassigned members hold none");
 
   // Refunding the pack (provider webhook) unassigns every seat and closes the pack.
   const seatHolders = (await seats.activeSeats(poolId)).map((s) => s.user_id);
@@ -207,8 +266,12 @@ async function cleanup() {
   const orderRow = async (id) => (await pool.query("SELECT status, refund_scope FROM orders WHERE id=$1", [id])).rows[0];
 
   // ---- Cancel renewal with a renewal paid in advance: that renewal is refunded in full (option A)
+  const cartPass = async (u) => (await pool.query("SELECT count(*)::int n FROM cart_items WHERE user_id=$1 AND product_id = ANY($2::text[])", [u.id, [subProduct.id, subProduct.slug].filter(Boolean)])).rows[0].n;
+  // An abandoned Renew left the pass in the cart: cancelling renewal removes it.
+  await pool.query("INSERT INTO cart_items (user_id, product_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [s.id, subProduct.slug || subProduct.id]);
   const c1 = await subs.cancelRenewal({ ledger, projection, catalog, user: s });
   assert.equal(c1.ok, true);
+  assert.equal(await cartPass(s), 0, "cancel renewal removes a renewal left in the cart");
   assert.deepEqual(refundCalls.map((c) => c.orderId), [orderOf(p2)], "only the queued renewal is refunded");
   assert.equal(refundCalls[0].amount, subProduct.price, "in full");
   assert.deepEqual(await orderRow(orderOf(p2)), { status: "REFUND_PENDING", refund_scope: "RENEWAL_CANCEL" });
@@ -301,14 +364,20 @@ async function cleanup() {
   const q1 = await mk(false);
   const q2 = await mk(true);
   const c0 = refundCalls.length;
+  // An abandoned Renew left the pass in the cart, next to a course: the refund removes only the pass.
+  const otherCourse = products.find((x) => (x.type || "COURSE") === "COURSE");
+  await pool.query("INSERT INTO cart_items (user_id, product_id) VALUES ($1,$2),($1,$3) ON CONFLICT DO NOTHING", [s2.id, subProduct.slug || subProduct.id, otherCourse.slug || otherCourse.id]);
   const r2 = await subs.refundPass({ ledger, projection, catalog, user: s2 });
   assert.deepEqual(r2.failed, []);
+  assert.equal(await cartPass(s2), 0, "refunding the pass removes a renewal left in the cart");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM cart_items WHERE user_id=$1", [s2.id])).rows[0].n, 1, "other cart items stay");
+  await pool.query("DELETE FROM cart_items WHERE user_id=$1", [s2.id]);
   assert.deepEqual(refundCalls.slice(c0).map((c) => c.orderId).sort(), [orderOf(q1), orderOf(q2)].sort(), "both payments in one click");
   await refundHook(q2);
   assert.ok(subs.activePass(projection, s2.id), "still active until the last part is confirmed");
   await refundHook(q1);
   assert.equal(subs.activePass(projection, s2.id), null);
-  console.log("[ok] M4 Refund with original + renewal: both refunded in one click, access ends when the last is confirmed");
+  console.log("[ok] M4 Refund with original + renewal: both refunded in one click, access ends when the last is confirmed; a renewal left in the cart is removed (also on cancel renewal)");
   PaymentService.prototype.initiateRefund = realRefund;
 
   const fakeEnt = { cancelledAt: null, expiresAt: new Date(Date.now() + 3 * 86400e3).toISOString() };

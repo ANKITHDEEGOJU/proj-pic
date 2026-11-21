@@ -11,7 +11,7 @@
 // Payment is stubbed (no provider needed). Removes its own rows at the end; its @test.local
 // users stay.
 require("dotenv").config();
-for (const k of ["GROQ_API_KEY", "GEMINI_API_KEY", "LLM_BASE_URL"]) delete process.env[k]; // never call a real model here
+for (const k of ["GROQ_API_KEY", "LLM_BASE_URL"]) delete process.env[k]; // never call a real model here
 const assert = require("node:assert/strict");
 const { randomUUID, randomBytes } = require("node:crypto");
 const express = require("express");

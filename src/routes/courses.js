@@ -7,6 +7,32 @@ const { layout, courseCard, subscriptionCard, accessFragment, activityPage, ledg
 const { resolveSubscriptionPrice } = require('../services/pricingEngine');
 const { isRefundPending } = require('../services/refundStatus');
 const { passState, cardOpts } = require('../services/subscriptions');
+const { createHash } = require('node:crypto');
+
+// What this user can open right now, as a short fingerprint: for every product, allowed or not
+// and why. An open page sends it back every few seconds (and when its tab becomes visible again);
+// if it changed (an admin revoked or granted access, a refund or payment arrived, a pass ended),
+// the page reloads, so a course that was revoked doesn't stay on screen as "Owned".
+function accessFingerprint(engine, userId) {
+  const { catalog, decisions } = engine;
+  const state = catalog.list()
+    .map((p) => p.slug || p.id)
+    .sort()
+    .map((slug) => { const d = decisions.evaluateAccess(userId, slug); return `${slug}:${d.allowed ? 1 : 0}:${d.reason}`; })
+    .join('|');
+  return createHash('sha256').update(state).digest('hex').slice(0, 16);
+}
+// Re-check every 5 s, and at once when the tab is shown again.
+const RECHECK_TRIGGER = "every 5s, visibilitychange[document.visibilityState=='visible'] from:document";
+const accessWatcher = (fp) =>
+  `<div hx-get="/courses/access-state?fp=${fp}" hx-trigger="${RECHECK_TRIGGER}" hx-swap="none"></div>`;
+
+// GET /courses/access-state?fp= - 204 while access is unchanged, otherwise reload the page.
+router.get('/courses/access-state', requireAuth, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (accessFingerprint(req.app.locals.engine, req.user.id) === String(req.query.fp || '')) return res.status(204).end();
+  res.set('HX-Refresh', 'true').status(200).end();
+});
 
 // GET /courses/subscription-banner
 router.get('/courses/subscription-banner', requireAuth, async (req, res) => {
@@ -86,7 +112,7 @@ router.get('/courses', requireAuth, async (req, res) => {
       )
     ).join('');
 
-    const body = `<h2>Courses</h2>${subBanner}${cards}`;
+    const body = `<h2>Courses</h2>${accessWatcher(accessFingerprint(req.app.locals.engine, req.user.id))}${subBanner}${cards}`;
     res.send(layout('Courses', body, req.user, cart.length));
   } catch (err) {
     console.error('Error rendering courses page:', err);

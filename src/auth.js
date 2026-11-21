@@ -36,7 +36,7 @@ function requireAuth(req, res, next) {
 // organization's page (/org/<id>, linked from /admin/orgs).
 const SHOPPER_PAGES = [
   /^\/courses(\/|$)/, /^\/cart(\/|$)/, /^\/checkout(\/|$)/, /^\/razorpay\/checkout/, /^\/subscription(\/|$)/,
-  /^\/activity(\/|$)/, /^\/agent(\/|$)/, /^\/assistant(\/|$)/, /^\/org\/?$/, /^\/org\/seats\/checkout$/,
+  /^\/activity(\/|$)/, /^\/agent(\/|$)/, /^\/assistant(\/|$)/, /^\/org\/?$/, /^\/org\/seats\/checkout$/, /^\/org\/request$/,
 ];
 const GUIDE = /^\/courses\/[^/]+\/doc(\/status)?$/;
 function keepAdminInAdminArea(req, res, next) {

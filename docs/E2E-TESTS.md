@@ -139,7 +139,7 @@ All pass: in-memory ledger, Postgres ledger, M2/M6 (webhooks, reconciliation), M
 subscriptions), M5 (quotas), M7 (agent purchases: tampered / replayed / expired / cancelled / wrong
 agent / price changed / already owned / provider switch / `PAYMENT_PENDING` / `PAID_LATE`), assistant
 (fake model: tools, cards, approve / cancel / pay buttons, checkout closed, declined payment, polling,
-false claims, server-side lookup, rate-limit fallback, daily limit, finished card marked for removal
+false claims, server-side lookup, rate limit (MODEL_BUSY), daily limit, finished card marked for removal
 with one outcome line, no card on `/agent` for finished requests, degenerate model output cleaned).
 
 `npm run verify:failures` passed duplicate and delay in this run; its drop / reorder / refund-500 steps need the
@@ -171,7 +171,7 @@ and moved from `src/` to `test/`; all pass (section 15).
 ## 7. Notes and open points
 
 - **Shared session.** The owner was using the same account in parallel (the Event Sourcing 101 approval with password and its Razorpay payment at 18:43 were not made by the test run; the run had just cancelled that checkout, which is how A15 was observed). Chrome password autofill into the approval password box cannot be ruled out for that approval: a browser that saves the password weakens the step-up. **Done:** the step-up box now has `autocomplete="new-password"` (section 11, X4).
-- **Groq free tier** rate-limits after a few quick messages; add `GEMINI_API_KEY` for the fallback.
+- **Groq free tier** rate-limits after a few quick messages; wait a minute and try again.
 - **Razorpay saved card / recurring**: not available on the test account (removed earlier).
 - **Browser extension permissions**: the mock provider's ngrok page and, later, the app's ngrok page became non-clickable / non-readable for the automation; those checks were done through the server and the database.
 
@@ -329,3 +329,105 @@ login), as expected.
 Live re-run after the fixes (new secrets, mock copy with the new secret): 30 guide attacks, 0 leaks
 (including paying 0.01); `/api/dev/events` 404; webhook and admin session forged with the old
 example secrets rejected (401 / 302). `npm run verify`: 11 suites pass.
+
+## 16. Organizations set up by the admin (2026-11-21, ADR-023)
+
+*Superseded the same day by section 19: the admin no longer creates organizations or edits managers; a learner requests and the admin approves.*
+
+Run on a separate copy of the new code (app on :3100, mock on :3101, its own copy of the mock's
+data file), so the servers already running on :3000 / :3001 were not touched. Mock provider, signed
+webhooks, `RECON_GRACE_SECONDS=0`.
+
+| # | Step | Result |
+|---|---|---|
+| G1 | Learner with no organization opens `/org` | *You are not part of an organization*; no buy form, no way to create one |
+| G2 | Learner or manager-to-be posts to `/admin/orgs` | 403, nothing created |
+| G3 | Admin creates an organization with two managers (one not signed up yet) | created; the list shows both emails |
+| G4 | Admin: same name in other case; admin's own email as manager | *already exists*; *cannot be an organization manager* |
+| G5 | Manager buys a 1-seat pack, pays on the mock page | back to `/org?checkout=paid`; signed webhook -> pack ACTIVE, *0 of 1 seats in use* |
+| G6 | Non-manager posts a seat checkout / an assignment for that organization | *Only a manager…*, no order / 404 |
+| G7 | Manager assigns a seat, then a second one | assigned; *All 1 seats are in use* |
+| G8 | Seat holder opens `/org` and `/org/<id>` | *Your organization seats* (organization, course, since), no controls; `/org/<id>` -> `/org` |
+| G9 | Manager named before sign-up creates the account | sees the organization and the buy form at once |
+| G10 | Admin removes the first manager | that manager sees *You are not part of an organization*, can't assign (404); the seat holder keeps the seat and access |
+
+Also run: `npm run verify` (11 suites pass, 5 new checks), `npm run verify:failures` against the same
+copy (pass), and `npm run evaluate` (all incorrect-outcome counts unchanged; the committed results
+were kept). The new HTTP check fails when the manager check on a seat pack is removed. The 14
+existing organizations were migrated: each buyer is now that organization's first manager.
+
+## 17. Admin users count, Revoke layout, refund after an abandoned renewal (2026-11-21)
+
+| # | Found | Cause | Fixed | Check |
+|---|---|---|---|---|
+| D21 | Dashboard and Users said about 4,800 users | The `users` table really holds them: 4,776 were `@test.local` accounts made by `npm run verify` and the evaluation (eval 1,248, asst 762, …), 29 are real. They can't be deleted: their ledger rows are append-only | Real users and test accounts are counted apart ("29; 4,796 automated-test accounts hidden"); the Users list hides test accounts unless *Show them* (`?tests=1`); a search finds every account | verify-idempotency "admin users" |
+| D22 | On Users, a long course name squeezed the Revoke button ("Rev / oke") and badges had different widths | Badges were inline pills with no fixed button size | One full-width row per entitlement: the name wraps on the left, Revoke stays one line on the right | verify-idempotency; screenshots at 1400 and 900 px |
+| D23 | After *Refund Subscription* the pass card said *In Cart · View Cart* and the navbar *Cart (1)* | An earlier **Renew** puts the pass in the cart and opens `/cart`; leaving without paying kept it there, so after the refund the page offered to check it out | Refunding the pass or cancelling renewal removes the pass from the cart (other cart items stay) | verify-m4 (fails without the fix); live: Renew, leave, Refund -> card offers the pass again, Cart (0) |
+
+Live re-run on the separate copy (:3100 / :3101): `verify:failures` pass, organizations run pass, the
+D23 sequence pass. `npm run verify`: 11 suites pass.
+
+## 18. D24: Razorpay refunds stuck on "Refund pending" (2026-11-21, ADR-024)
+
+| What | Observed |
+|---|---|
+| Razorpay refund status (API, test mode) | `rfnd_U2lk…` and `rfnd_U2mR…` both **processed** immediately |
+| Refund webhook delay, 19–20 Nov (12 refunds) | 75–77 s every time |
+| Refund webhook delay, 21 Nov | **15 min 31 s** (reconciliation fixed it first, MISSING_REFUND, at 11 min) and **5 min 29 s** |
+| ngrok inspector meanwhile | Razorpay payment webhooks 200 OK; no refund request reached the app until Razorpay sent it |
+| Conclusion | Not a LEARNX error: Razorpay sent the refund webhook late; LEARNX waited for it or for the 15-minute reconciliation |
+
+Fix: a refund pending for more than 90 s is checked with the provider every 30 s and applied if the
+provider has it (`REFUND_CONFIRMED`). Live (separate copy, mock provider, refund webhook dropped,
+scheduled reconciliation off): order REFUNDED after **100 s**. `verify-m2-m6` has the new check;
+`npm run verify` 11 suites and `npm run verify:failures` pass.
+
+## 19. Organizations requested by a learner, approved by the admin (2026-11-21, ADR-023 revised)
+
+Separate copy of the new code (app :3100, mock :3101), mock provider, signed webhooks.
+
+| # | Step | Result |
+|---|---|---|
+| R1 | Learner with no organization opens `/org` | *You are not part of an organization* + *Request an organization*; no buy form |
+| R2 | Learner sends a request | *Waiting for approval*; admin dashboard: *1 request waiting* |
+| R3 | Second request by the same learner; the same name by another learner (other case) | *already have a request waiting*; *already taken or requested* |
+| R4 | Requester / another learner posts Approve or Reject | 403 |
+| R5 | Admin sends a request | 403 (admin pages only) |
+| R6 | Admin clicks **Approve** (and again) | organization created, requester is manager; second click *already approved* |
+| R7 | Manager buys a 1-seat pack, pays on the mock page | back to `/org?checkout=paid`; signed webhook -> pack ACTIVE |
+| R8 | Manager assigns a seat, then a second | assigned; *All 1 seats are in use* |
+| R9 | Member opens `/org`, `/org/<id>`, `/courses` | *Your organization seats* (that organization, the course), no controls; `/org/<id>` -> `/org`; the course opens; learner navbar kept |
+| R10 | Admin opens `/org/<id>`, tries to assign / refund | read-only page; 404 for both |
+| R11 | Admin rejects another request with a reason | learner sees *not approved: <reason>* and can ask again; no organization |
+
+`npm run verify`: 11 suites pass (verify-m4: request rules, decided once, two approvals at once -> one
+organization; verify-security: the HTTP rules above, fails when the admin check on Approve is removed).
+
+## 20. D25: Revoked course still shown until reload (2026-11-21)
+
+| | |
+|---|---|
+| Found | After the admin revoked a course, the learner's open pages still showed it until a reload |
+| Cause | The server already refused it at once (403 on the guide, every request is checked), but open pages didn't know: the guide re-checked only every **30 s**, and the Courses page never re-checked, so its card kept *Owned* / *Open guide* |
+| Fix | The guide re-checks every **5 s** and when its tab is shown again; the Courses page sends a fingerprint of the user's access (`/courses/access-state`) on the same schedule and reloads when it changed (204 while unchanged) |
+| Checked in headless Chrome (separate copy) | Courses page and guide open, admin clicks Revoke: **both reloaded after 3 s**; the guide says *Your access to this course was revoked by an admin.*, the card has no *Open guide*; with no change, no reload in 16 s |
+| Automated | `verify-content` "admin revoke with the guide and Courses page open"; `npm run verify` 11 suites pass |
+
+## 21. Re-test of every change made on 2026-11-21
+
+Run at the end of the day on the final code, on a separate copy (app :3100, mock :3101, scheduled
+reconciliation off, refund check after 5 s instead of 90 s so the run is short); the servers on
+:3000 / :3001 were not touched. Test accounts are `@test.local` users made by the script.
+
+| # | Change | Steps | Result |
+|---|---|---|---|
+| L1 | Organizations (ADR-023, Section 19) | Learner requests; dashboard shows it waiting; a learner's Approve -> 403; admin approves; manager pays a 1-seat pack on the mock page; assigns one member, a second is refused; member's `/org` and `/courses`; admin's `/org/<id>`; another request rejected with a reason | PASS: pack ACTIVE from the signed webhook; *All 1 seats are in use*; member sees only that organization and opens the course; admin page read-only, assign -> 404; *not approved: <reason>* |
+| L2 | Late refund webhook (D24, ADR-024) | Buy Intro to SQL; mock switch *Drop webhooks* x1; Refund | PASS: REFUND_PENDING, then REFUNDED by the refund check (a `refund-check` run row written); card shows the refund, access denied |
+| L3 | Pass refund and the cart (D23) | Buy the pass, Refund | PASS: REFUNDED; cart has 0 items, no checkout offered |
+| L4 | Revoke with pages open (D25) | Admin grants a course with a guide; learner's Courses fingerprint and guide status -> 204; admin revokes | PASS: both answer `HX-Refresh` on the next check; pages poll every 5 s and when shown again |
+| L5 | Admin users count and Revoke layout (D21, D22) | Dashboard, Users, `?tests=1`, search by a test email | PASS: real count shown; test accounts hidden from the list, shown with `?tests=1`, found by search; Revoke button `white-space: nowrap` |
+| L6 | Lost payment webhook still repaired | Mock *Drop webhooks* x1; buy; **Run reconciliation now** | PASS: order COMPLETED, course owned |
+
+Also: `npm run verify` 11 suites pass (140 named checks); `npm run verify:failures` against the same
+copy 6/6 (duplicate, delay, drop payment, drop refund, reorder, refund API 500). The test organization
+the run made was removed afterwards.

@@ -7,7 +7,7 @@ outcomes are wrong.
 |---|---|---|---|
 | **Naive baseline** | `baseline.js` | Each webhook turns an access flag on or off and records revenue; limits are "read, then write" | Deduplication, order matching, race-safe limits, event history, retry, reconciliation |
 | **Careful baseline** | `baseline-careful.js` | The usual webhook advice: one row per payment id (duplicates ignored), payment must match the order's amount and currency, quota as one conditional `UPDATE`, seats under a row lock, one-time approval as a conditional `UPDATE` | Event history (access is still a flag), handling a refund that arrives before its payment (it is ignored), reconciliation |
-| **LEARNX** | the real code | Webhook inbox and processor, append-only ledger and projection, retry worker, reconciliation, quotas, seats, agent purchase service | (see the report, §8) |
+| **LEARNX** | the real code | Webhook inbox and processor, append-only ledger and projection, retry worker, reconciliation, quotas, seats, agent purchase service | (see the report, Section 8) |
 
 The careful baseline is there so the comparison is not against a strawman: it shows which failures
 ordinary care already prevents, and which ones need LEARNX's design.
@@ -86,6 +86,6 @@ connections than the pool of 10 has left. The seat count stays correct; the app 
 it is restarted.
 
 A fix (an in-memory queue so that waiting assignments hold no connection) was prototyped and passed,
-but it is **not part of the submitted code** (ADR-031). S6 therefore uses 6 parallel assignments, below
+but it is **not part of the submitted code** (ADR-020). S6 therefore uses 6 parallel assignments, below
 the pool size, so it measures correctness of the race rather than the freeze. The freeze is listed as a
-known defect in the report (§8) and as a GitHub issue.
+known defect in the report (Section 8) and as a GitHub issue.

@@ -93,6 +93,9 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
   const reconMs = Number(process.env.RECON_INTERVAL_MS ?? 15 * 60_000);
   if (retryMs > 0) startInterval('retry', retryMs, () => retryDueWebhooks({ ledger: engine.ledger }));
   if (reconMs > 0) startInterval('recon', reconMs, () => app.locals.reconciler.run({ trigger: 'scheduled' }));
+  // A refund whose webhook is late is confirmed with the provider directly (see confirmPendingRefunds).
+  const refundCheckMs = Number(process.env.REFUND_CHECK_INTERVAL_MS ?? 30_000);
+  if (refundCheckMs > 0) startInterval('refund-check', refundCheckMs, () => app.locals.reconciler.confirmPendingRefunds());
   // M7: expire stale agent purchase requests, fail executed ones whose payment never completed.
   const agentSweepMs = Number(process.env.AGENT_SWEEP_INTERVAL_MS ?? 60_000);
   if (agentSweepMs > 0) startInterval('agent-sweep', agentSweepMs, () => require('./services/agentPurchase').sweep());
