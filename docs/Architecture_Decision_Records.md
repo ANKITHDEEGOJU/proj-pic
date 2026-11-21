@@ -446,7 +446,7 @@ through the normal checkout, so the ledger records an ordinary purchase.
 `test/verify-agent-coupons.js` (stale card, password race); evaluation S7.
 
 **Revisit trigger.** AP2 tooling usable in a sandbox, or a third party needing to verify approvals
-(user-held keys, issue 5).
+(user-held keys).
 
 ---
 
@@ -788,7 +788,7 @@ Organizations, Guides and Assistant log; login leads to `/admin`; shop pages sen
 actions 403; learners unchanged"), which fails with the check removed.
 
 **Revisit trigger.** A second admin role (e.g. support staff who buy for a user), or the separate admin
-area of option 4 (issue 11).
+area of option 4.
 
 ---
 

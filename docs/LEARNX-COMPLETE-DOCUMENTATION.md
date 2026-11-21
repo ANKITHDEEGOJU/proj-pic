@@ -2,8 +2,8 @@
 
 *Plan, architecture, products, decisions and test evidence in one document. Written 2026-11-20.*
 
-This document combines four sources that grew separately during the project: the working plan
-(`plan.txt`), the project overview (`docs/PROJECT-OVERVIEW.md`), the end-to-end test report
+This document combines the sources that grew separately during the project: the working plan
+(`plan.txt`), an earlier project overview, the end-to-end test report
 (`docs/E2E-TESTS.md`) and the architecture decision records (`docs/Architecture_Decision_Records.md`).
 They overlapped and described the same work from different angles. Here each feature and each decision is
 explained once and completely: what was built, why that option was chosen over the alternatives, what

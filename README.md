@@ -319,7 +319,7 @@ There is **no approve tool**. The assistant has its own agent identity (`learnx-
 - `docs/Project_Report.pdf`: the final report.
 - `docs/Architecture_Decision_Records.md`: the design decisions (ADR-000 to ADR-024).
 - `docs/E2E-TESTS.md`: the end-to-end test runs and the defects found.
-- `docs/LEARNX-COMPLETE-DOCUMENTATION.md` and `docs/PROJECT-OVERVIEW.md`: the whole project in detail.
+- `docs/LEARNX-COMPLETE-DOCUMENTATION.md`: the whole project in detail (architecture, every component and table, security, operations).
 
 ## Project structure
 

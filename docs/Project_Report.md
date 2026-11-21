@@ -274,7 +274,7 @@ ngrok-hosted mock checks were driven through the mock's endpoint (browser-extens
 | Automatic recurring billing | **Missing:** needs Razorpay card mandates (not available on the test account; ADR-013) |
 | Seat assignment under bursts | **Known defect:** 10 or more simultaneous assignments to one pack can freeze the app (ADR-020, issue 1) |
 | Multi-instance deployment | **Missing:** in-memory projection, guide list, rate-limit counters and seat queue; background jobs in the web process |
-| Coupon redemption limits, email verification, refund window | **Missing** |
+| Coupon redemption limits, email verification, refund window | **Missing** (issues 3, 4) |
 | Admin view of quota usage; inbox retention policy | **Missing** |
 
 **Risks and technical debt:**
@@ -285,26 +285,25 @@ ngrok-hosted mock checks were driven through the mock's endpoint (browser-extens
 - **Open pages poll:** open Courses pages and guides re-check access every 5 s (one small request each);
   push updates (server-sent events) would remove the polling.
 - **Test database:** tests run against the development database and clean up after themselves; ledger rows of test users stay (append-only).
-- **Mock provider:** its admin pages are unauthenticated (local tool).
+- **Mock provider:** its admin pages are unauthenticated (local tool; issue 6).
 - **Privacy:** chat messages and the course list are sent to the model provider; assistant logs keep messages for 90 days (admin-only).
 - **Accepted design risk:** domain coupons trust unverified email domains.
 
-Open items are tracked as GitHub issues: https://github.com/ANKITHDEEGOJU/proj-pic/issues (issues 1–5 match the tasks in Section 9).
+Open items are tracked as GitHub issues: https://github.com/ANKITHDEEGOJU/proj-pic/issues (issues 1–6; Section 9 lists them in priority order).
 
 ## 9. Way forward
 
 | # | Task (GitHub issue) | Start from | Rationale | Dependencies / blockers | Done when |
 |---|---|---|---|---|---|
-| 1 | Fix the seat-assignment freeze | `src/services/seats.js` (`withPoolLock`), ADR-020 prototype | A known defect that stops the whole app | None | 12 simultaneous assignments to a 1-seat pack finish in under 15 s with exactly 1 seat; S6 runs with 10 |
-| 2 | Run more than one app instance | `src/domain/projection.js`, `src/services/rateLimit.js`, `src/services/seats.js` | Needed for availability beyond one machine | Task 1; PostgreSQL LISTEN/NOTIFY | Two instances behind a proxy pass `npm run verify` and S1–S7 with 0 incorrect outcomes |
-| 3 | Separate test database and CI | `package.json` scripts, `test/` | Tests now share the development database | GitHub Actions with a PostgreSQL service | Every push runs the 11 suites on a fresh database, green |
-| 4 | Email verification and coupon redemption limits | `src/routes/auth.js`, `src/services/pricingEngine.js` | Domain coupons trust unverified emails; coupons have no usage limit | An email-sending service (test mode) | A domain coupon is unusable before verification; a limited coupon is never redeemed past its limit under 50 parallel checkouts |
-| 5 | User-held approval keys toward AP2 | `src/services/agentPurchase.js` (`signToken`), ADR-011 | Today the server signs approvals; a third party can't verify them | Passkey/WebAuthn support in the browser | An approval verifiable with the user's public key; replay and tamper tests still pass |
+| 1 | Fix the seat-assignment freeze ([#1](https://github.com/ANKITHDEEGOJU/proj-pic/issues/1)) | `src/services/seats.js` (`withPoolLock`), ADR-020 prototype | A known defect that stops the whole app | None | 12 simultaneous assignments to a 1-seat pack finish in under 15 s with exactly 1 seat; S6 runs with 10 |
+| 2 | Run more than one app instance ([#2](https://github.com/ANKITHDEEGOJU/proj-pic/issues/2)) | `src/domain/projection.js`, `src/services/rateLimit.js`, `src/services/seats.js` | Needed for availability beyond one machine | Task 1; PostgreSQL LISTEN/NOTIFY | Two instances behind a proxy pass `npm run verify` and S1–S7 with 0 incorrect outcomes |
+| 3 | Email verification and coupon redemption limits ([#3](https://github.com/ANKITHDEEGOJU/proj-pic/issues/3)) | `src/routes/auth.js`, `src/services/pricingEngine.js` | Domain coupons trust unverified emails; coupons have no usage limit | An email-sending service (test mode) | A domain coupon is unusable before verification; a limited coupon is never redeemed past its limit under 50 parallel checkouts |
+| 4 | Refund time window ([#4](https://github.com/ANKITHDEEGOJU/proj-pic/issues/4)) | `src/services/refunds.js` (`requestRefund`) | Refunds are allowed at any time, even after months of use | None | A refund inside the window works as today; one outside it is refused with a clear message and no provider call |
+| 5 | Protect the mock provider's admin pages ([#6](https://github.com/ANKITHDEEGOJU/proj-pic/issues/6)) | `mock-provider/server.js` | Its failure switches have no login; unsafe if exposed through ngrok | None | `/admin/*` returns 401 without the secret; `npm run verify:failures` still passes |
 
 Automatic renewal is not in this list: it is blocked by the provider (no card mandates on the Razorpay
-test account, ADR-013). Further extensions are tracked as issues 6–12, among them a **separate admin
-area** (its own layout, and a per-user view of what a user can access and why) building on ADR-022, and
-co-managers for an organization, building on ADR-023.
+test account, ADR-013). A third payment provider (Stripe test mode, [#5](https://github.com/ANKITHDEEGOJU/proj-pic/issues/5)) is tracked as a further
+extension, to show provider neutrality beyond Razorpay and the mock.
 
 ## 10. Contributions, AI use & attribution
 
