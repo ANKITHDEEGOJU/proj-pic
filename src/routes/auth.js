@@ -3,7 +3,7 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
-const { issueToken, clearToken } = require('../auth');
+const { issueToken, clearToken, isAdminEmail, homePath } = require('../auth');
 const { layout, authForm, errorFragment } = require('../views');
 const limit = require('../services/rateLimit');
 
@@ -12,11 +12,11 @@ const tooMany = (res, sec) => res.set('Retry-After', String(sec)).send(errorFrag
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Home: logged-in users go to the course list, everyone else to the login page.
-router.get('/', (req, res) => res.redirect(req.user ? '/courses' : '/login'));
+// Home: the admin goes to the dashboard, other logged-in users to the course list, everyone else to login.
+router.get('/', (req, res) => res.redirect(req.user ? homePath(req.user) : '/login'));
 
-router.get('/login',    (req, res) => req.user ? res.redirect('/courses') : res.send(layout('Login', authForm('login'), null)));
-router.get('/register', (req, res) => req.user ? res.redirect('/courses') : res.send(layout('Register', authForm('register'), null)));
+router.get('/login',    (req, res) => req.user ? res.redirect(homePath(req.user)) : res.send(layout('Login', authForm('login'), null)));
+router.get('/register', (req, res) => req.user ? res.redirect(homePath(req.user)) : res.send(layout('Register', authForm('register'), null)));
 
 router.post('/register', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -35,7 +35,7 @@ router.post('/register', async (req, res) => {
     const { rows } = await pool.query(
       'INSERT INTO users (email, password_hash) VALUES ($1,$2) RETURNING id, email', [email, hash]);
     issueToken(res, rows[0]);
-    res.set('HX-Redirect', '/courses').end();
+    res.set('HX-Redirect', homePath({ isAdmin: isAdminEmail(rows[0].email) })).end();
   } catch (e) {
     if (e.code === '23505') 
       return res.send(errorFragment('Email already registered'));
@@ -62,7 +62,7 @@ router.post('/login', async (req, res) => {
     limit.reset('loginFail', `${email}|${req.ip}`);
     limit.reset('loginEmail', email);
     issueToken(res, rows[0]);
-    res.set('HX-Redirect', '/courses').end();
+    res.set('HX-Redirect', homePath({ isAdmin: isAdminEmail(rows[0].email) })).end();
   } catch (e) {
     console.error('[login]', e);
     res.send(errorFragment('Server error'));

@@ -38,6 +38,7 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 | [ADR-030](#adr-030--a-light-clean-up-instead-of-a-full-restructure) | A light clean-up instead of a full restructure | Accepted | All |
 | [ADR-031](#adr-031--bound-concurrent-seat-lock-holders-to-avoid-exhausting-the-connection-pool) | Bound concurrent seat-lock holders to avoid exhausting the connection pool | Proposed (not implemented) | M4 |
 | [ADR-032](#adr-032--evaluate-against-two-baselines-naive-and-careful) | Evaluate against two baselines: naive and careful | Accepted | Evaluation |
+| [ADR-033](#adr-033--the-admin-account-uses-only-the-admin-pages-and-does-not-shop) | The admin account uses only the admin pages and does not shop | Accepted | Security, M3 |
 
 ---
 
@@ -388,4 +389,14 @@ Log written on **2026-11-20**. Decision dates come from the commit that introduc
 - **Consequences & trade-offs:** + the claim is narrower and defensible ("ordering and recovery", not "7 of 7"); − the careful baseline's S2 result depends on its choice to ignore an unknown refund (stated in the report); the workloads stay small and deterministic, and webhooks skip the HTTP route (covered by the test suites instead).
 - **Evidence & validation:** `evaluation/baseline.js`, `evaluation/baseline-careful.js`, `evaluation/run-evaluation.js`; `evaluation/results/` (seed 42, 5 runs).
 - **Revisit trigger:** a new failure mode in production that the careful baseline would also handle (then LEARNX's design needs a new justification), or a move to load testing.
+
+## ADR-033 — The admin account uses only the admin pages and does not shop
+
+- **Date, status & scope:** 2026-11-21. Accepted. Security and access (M3); `src/auth.js` (`keepAdminInAdminArea`, `homePath`), `src/views.js` (admin navbar), `src/routes/auth.js` (login redirect), `src/routes/content.js` (guide back link).
+- **Context & decision drivers:** the admin saw the learner's navbar (Courses, Activity, Organization, Agent, Cart) plus a "Panel" link, landed on the course list after login, and could buy like any learner. A purchase by the admin puts the admin into the ledger as a customer, which muddles the audit trail; the admin's job is to give access (grants, logged as admin actions), price, reconcile and review the assistant log.
+- **Options considered:** (1) keep as is; (2) a separate admin navbar and login to `/admin`, shop pages only hidden; (3) **(2) plus closing the shop pages to the admin**; (4) a fully separate admin area with its own layout and a per-user access view.
+- **Decision & rationale:** option 3. Hiding links (2) still leaves the shop reachable by typing an address; (4) is larger than needed now. The admin's navbar lists Dashboard, Users, Pricing, Reconciliation, Organizations, Guides and Assistant log; `/`, `/login` and a successful login lead to `/admin`. Shop pages (`/courses`, `/cart`, `/checkout`, `/razorpay/checkout`, `/subscription`, `/activity`, `/agent`, `/assistant`, `/org`, `/org/seats/checkout`) redirect the admin to `/admin` (htmx: `HX-Redirect`), and any other method is refused with 403, nothing done. Still open: course guides (admin preview) and `/org/<id>` (reached from `/admin/orgs`).
+- **Consequences & trade-offs:** + the admin can't appear as a customer; a clear admin workspace; − the admin can't try the shop with the admin account (use a learner account); a new shop route must be added to the list in `src/auth.js` (the route list is the maintenance cost). Learners are unaffected.
+- **Evidence & validation:** `test/verify-security.js` ("admin: own navbar … login -> /admin; shopper pages -> /admin, shopper actions 403; guides and /org/<id> open; learners unchanged"); the check fails with the middleware removed. `npm run verify`: 11/11.
+- **Revisit trigger:** more than one admin role (for example support staff who may buy on a user's behalf), or the separate admin area of option 4 (issue 11).
 

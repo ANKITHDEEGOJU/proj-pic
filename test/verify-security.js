@@ -7,6 +7,8 @@
 //   - /api/dev/events: 404 for users, 404 for the admin unless ENABLE_DEV_EVENTS=1; bad input -> 400
 //   - error handler: no internal error text to the client, only a reference
 //   - malformed ids on org routes: 404, no crash
+//   - the admin stays in the admin pages: admin navbar, login lands on /admin, shopper pages
+//     redirect, shopper actions refused; guides and /org/<id> stay open; learners unaffected
 // Removes its requests and quota rows; its @test.local users stay.
 process.env.LOGIN_MAX_FAILS = "3";
 process.env.LOGIN_MAX_PER_IP = "1000";
@@ -25,7 +27,7 @@ const pool = require("../src/db");
 const { createEngine } = require("../src/domain");
 const { loadProducts } = require("../src/domain/catalogLoader");
 const { PgLedgerStore } = require("../src/domain/stores/pgLedgerStore");
-const { attachUser } = require("../src/auth");
+const { attachUser, keepAdminInAdminArea } = require("../src/auth");
 const agent = require("../src/services/agentPurchase");
 const limit = require("../src/services/rateLimit");
 // Clears every login counter (per email+IP, per email, per IP) between scenarios.
@@ -63,6 +65,7 @@ async function cleanup() {
   app.use(express.json());
   app.use(cookieParser());
   app.use(attachUser);
+  app.use(keepAdminInAdminArea); // as in server.js
   app.locals.engine = engine;
   app.locals.agentStartPayment = async () => ({ status: "CHECKOUT", redirectUrl: "http://mock.test/pay/x" });
   app.use(require("../src/routes/auth"));
@@ -190,6 +193,35 @@ async function cleanup() {
   delete process.env.ENABLE_DEV_EVENTS;
   assert.equal(engine.decisions.evaluateAccess(buyer.id, course.id).allowed, false, "nobody got access");
   console.log("[ok] /api/dev/events: 404 for users and for the admin unless ENABLE_DEV_EVENTS=1; bad input -> 400 (no crash)");
+
+  // ------------------------------------------------------------ admin stays in the admin pages
+  resetLogin();
+  r = await send("POST", "/login", { form: { email: admin.email, password: PW } });
+  assert.equal(r.redirect, "/admin", "the admin lands on the dashboard after login");
+  resetLogin();
+  assert.equal((await send("POST", "/login", { form: { email: buyer.email, password: PW } })).redirect, "/courses", "a learner lands on the courses");
+  const ack = cookieOf(admin);
+  for (const p of ["/", "/courses", "/courses/intro-to-sql/card", "/cart", "/checkout/cancelled", "/razorpay/checkout", "/activity", "/activity/ledger", "/org", "/agent", "/assistant/card/x"]) {
+    const page = await send("GET", p, { cookie: ack, hx: false });
+    assert.ok(page.status === 302 && page.location === "/admin", `admin GET ${p} -> /admin (got ${page.status} ${page.location})`);
+  }
+  assert.equal((await send("GET", "/cart", { cookie: ack })).redirect, "/admin", "htmx request: HX-Redirect to /admin");
+  for (const p of ["/cart/add", "/cart/checkout", "/subscription/renew", "/org/seats/checkout", "/assistant/chat", `/courses/${course.slug || course.id}/checkout`]) {
+    const x = await send("POST", p, { form: { productId: course.id, message: "buy" }, cookie: ack });
+    assert.equal(x.status, 403, `admin POST ${p} refused`);
+  }
+  const orgPage = await send("GET", `/org/${randomUUID()}`, { cookie: ack, hx: false });
+  assert.notEqual(orgPage.location, "/admin", "an organization's page stays open to the admin");
+  const guide = await send("GET", `/courses/${course.slug || course.id}/doc`, { cookie: ack, hx: false });
+  assert.notEqual(guide.location, "/admin", "course guides stay open to the admin (preview)");
+  assert.equal((await send("GET", "/org", { cookie: ck, hx: false })).status, 200, "learners keep their pages");
+  const { layout } = require("../src/views");
+  const adminNav = layout("x", "", { email: admin.email, isAdmin: true }).match(/<nav>[\s\S]*?<\/nav>/)[0];
+  const userNav = layout("x", "", { email: buyer.email, isAdmin: false }).match(/<nav>[\s\S]*?<\/nav>/)[0];
+  for (const h of ["/admin", "/admin/users", "/admin/pricing-rules", "/admin/reconciliation", "/admin/orgs", "/admin/content", "/admin/assistant"]) assert.ok(adminNav.includes(`href="${h}"`), `admin navbar has ${h}`);
+  for (const h of ["/courses", "/activity", '"/org"', "/agent", "/cart"]) assert.ok(!adminNav.includes(h.startsWith('"') ? `href=${h}` : `href="${h}`), `admin navbar has no ${h}`);
+  assert.ok(userNav.includes('href="/courses"') && !userNav.includes('href="/admin'), "learner navbar unchanged, no admin links");
+  console.log("[ok] admin: own navbar (dashboard, users, pricing, reconciliation, organizations, guides, assistant log); login -> /admin; shopper pages -> /admin, shopper actions 403; guides and /org/<id> open; learners unchanged");
 
   // ------------------------------------------------------------ errors and malformed ids
   console.error = () => {};

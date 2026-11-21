@@ -166,7 +166,7 @@ A step-by-step demo of everything the project does, using the mock payment provi
 - In `.env`, point both servers at each other on localhost: `STREAMFLIX_URL=http://localhost:3000` and `MOCK_PROVIDER_URL=http://localhost:3001`.
 - Optional, so reconciliation fixes fresh events straight away: `RECON_GRACE_SECONDS=0`.
 - Start both servers (see **Running**). Keep two tabs open: the app (`http://localhost:3000`) and the mock admin page (`http://localhost:3001/admin`).
-- Register two users, for example `alice@demo.local` and `bob@demo.local`. Log in as `admin@learnx.com` (or your `ADMIN_EMAIL`) in a private window for the admin steps.
+- Register two users, for example `alice@demo.local` and `bob@demo.local`. Log in as `admin@learnx.com` (or your `ADMIN_EMAIL`) in a private window for the admin steps. The admin lands on the dashboard, and the navbar shows only the admin pages (Dashboard, Users, Pricing, Reconciliation, Organizations, Guides, Assistant log). The admin account doesn't shop: the shop pages send it back to the dashboard, and purchases are refused (ADR-033); access is given with grants under **Users**.
 
 **1. One-time purchase**
 1. As Alice, open **Courses**, click **Add to Cart** on a course, go to **Cart**, and check out with the mock provider.

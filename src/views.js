@@ -202,10 +202,15 @@ const layout = (title, body, user, cartCount = 0) => `<!doctype html>
 <nav>
 <span>
 <strong style="font-family: 'monospace';"><i>LearnX</i></strong>
-${user ? `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a><a href="/agent">Agent</a>${user ? navCart(cartCount) : ''} ${user.isAdmin ? '<a href="/admin">Panel</a>' : ''}` : ''}</span>
+${!user ? '' : user.isAdmin ? ADMIN_NAV : `<a href="/courses">Courses</a><a href="/activity">Activity</a><a href="/org">Organization</a><a href="/agent">Agent</a>${navCart(cartCount)}`}</span>
 ${user ? `<span class="nav-user">${esc(user.email)}<button hx-post="/logout">Logout</button></span>` : ''}
 </nav>
 ${body}</body></html>`;
+
+// The admin's navbar: only the admin pages (the shopper pages send the admin back, see auth.js).
+const ADMIN_NAV = ['/admin|Dashboard', '/admin/users|Users', '/admin/pricing-rules|Pricing', '/admin/reconciliation|Reconciliation',
+  '/admin/orgs|Organizations', '/admin/content|Guides', '/admin/assistant|Assistant log']
+  .map((x) => { const [href, label] = x.split('|'); return `<a href="${href}">${label}</a>`; }).join('');
 
 const authForm = (kind) => `
 <h2>${kind === 'login' ? 'Login' : 'Register'}</h2>

@@ -292,6 +292,7 @@ read-only security review, each verified live.
 | S8 | **`POST /api/dev/events` PURCHASE_SUCCEEDED** as a normal user | **guide opened** | 404 (needs `ENABLE_DEV_EVENTS=1` + admin) |
 | S9 | **Mock webhook signed with the public example secret**, no order, any product | **guide opened** | `NO_MATCHING_ORDER`, nothing granted |
 | S10 | **Admin session signed with the public example `JWT_SECRET`** | **admin pages open** | still open until the secret is changed (startup warning added) |
+| S11 | Admin opens shop pages (`/courses`, `/cart`, `/org`, `/agent`, …) or buys (added 21 Nov, after these runs) | redirected to `/admin`; purchases refused (403); guides and `/org/<id>` still open | automated in `verify-security`; not re-run in the browser |
 | S11 | `POST /org/pools/not-a-uuid/assign` | **server crashed** | 404, server up |
 | S12 | Guide response cacheable after refund | no `Cache-Control` | `no-store, private` |
 

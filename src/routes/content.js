@@ -108,9 +108,12 @@ router.get('/courses/:slug/doc', requireAuth, async (req, res, next) => {
     const { catalog, decisions } = req.app.locals.engine;
     const c = findCourse(catalog, req.params.slug);
     const doc = c && (await docs.get(c.id));
+    // The admin came from the Guides page (the course list is a shopper page).
+    const back = req.user.isAdmin ? '<a href="/admin/content"><button class="alt">← Back to Guides</button></a>'
+      : '<a href="/courses"><button class="alt">← Back to Courses</button></a>';
     if (!doc) {
       return res.status(404).send(layout('Course guide', `<h2>Course guide</h2><div class="card"><p>This course has no guide yet.</p>
-        <a href="/courses"><button class="alt">← Back to Courses</button></a></div>`, req.user));
+        ${back}</div>`, req.user));
     }
     const slug = c.slug || c.id;
     const d = decisions.evaluateAccess(req.user.id, slug); // asked on every request, never cached
@@ -132,7 +135,7 @@ router.get('/courses/:slug/doc', requireAuth, async (req, res, next) => {
     res.send(layout(doc.title, `
       <div style="display:flex;flex-wrap:wrap;gap:0.5rem;justify-content:space-between;align-items:center">
         <small style="color:#5B5F6E">Open through ${esc(via)}</small>
-        <a href="/courses"><button class="alt">← Back to Courses</button></a>
+        ${back}
       </div>
       ${adminPreview ? '' : `<!-- Re-checks access while the guide is open; reloads it (showing why) when access ends. -->
       <div hx-get="/courses/${esc(slug)}/doc/status" hx-trigger="every 30s" hx-swap="none"></div>`}

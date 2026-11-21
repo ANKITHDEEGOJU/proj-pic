@@ -41,7 +41,7 @@ instances.
 |---|---|
 | Learner | Buys, refunds, renews, uses the assistant, opens guides |
 | Organization owner | Buys seat packs and assigns seats |
-| Admin | Grants and revokes access, manages pricing, runs reconciliation, reads the assistant log, publishes guides |
+| Admin | Grants and revokes access, manages pricing, runs reconciliation, reads the assistant log, publishes guides; uses only the admin pages (no shopping) |
 | Payment providers | Razorpay test mode and a local mock |
 | AI assistant | An untrusted agent |
 
@@ -155,11 +155,11 @@ UNDERPAID / FAILED / CANCELLED / EXPIRED → REFUND_PENDING → REFUNDED / REFUN
 receive Razorpay webhooks locally).
 
 **Trust boundaries:**
-- **Browser to app:** an HttpOnly JWT cookie (HS256, random secret); password-guessing limits; admin rights by `ADMIN_EMAIL` (the address can't be registered).
+- **Browser to app:** an HttpOnly JWT cookie (HS256, random secret); password-guessing limits; admin rights by `ADMIN_EMAIL` (the address can't be registered); the admin account has its own navbar and can't use the shop pages or buy, so the ledger never shows the admin as a customer (ADR-033).
 - **Provider to app:** signed webhooks; a payment grants nothing unless it matches an order of that user in amount and currency.
 - **Model to app:** the model is untrusted. It has no approve tool, the server sets prices, and the approval token never reaches the model.
 
-**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-032):
+**Major decisions** (`docs/Architecture_Decision_Records.md`, ADR-000 to ADR-033):
 
 | Topic | ADRs |
 |---|---|
@@ -168,7 +168,7 @@ receive Razorpay webhooks locally).
 | Commercial rules | ADR-009, 019 (pass), 010 (seats), 011 (quotas); ADR-031 (seat freeze, proposed fix, not implemented) |
 | Agent purchases | ADR-012, 013, 027, 028 |
 | Payment safety | ADR-022, 023 |
-| Security | ADR-025, 026, 029 |
+| Security | ADR-025, 026, 029, 033 (admin doesn't shop) |
 | Evaluation method | ADR-000 (methodology), ADR-032 (two baselines) |
 
 ## 4. Methodology & experiment setup
@@ -322,7 +322,8 @@ Open items are tracked as GitHub issues: https://github.com/ANKITHDEEGOJU/proj-p
 | 5 | User-held approval keys toward AP2 | `src/services/agentPurchase.js` (`signToken`), ADR-012 | Today the server signs approvals; a third party can't verify them | Passkey/WebAuthn support in the browser | An approval verifiable with the user's public key; replay and tamper tests still pass |
 
 Automatic renewal is not in this list: it is blocked by the provider (no card mandates on the Razorpay
-test account, ADR-014).
+test account, ADR-014). Further extensions are tracked as issues 6–11, among them a **separate admin
+area** (its own layout, and a per-user view of what a user can access and why) building on ADR-033.
 
 ## 10. Contributions, AI use & attribution
 

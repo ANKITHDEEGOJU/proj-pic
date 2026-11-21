@@ -116,7 +116,7 @@ watched live. It affects only how access is calculated, never the ledger.
 |---|---|
 | **Learner** | Buys, refunds, renews, chats with the assistant, opens guides |
 | **Organization owner** | Buys seat packs and manages who holds a seat |
-| **Admin** (the account matching `ADMIN_EMAIL`) | Grants and revokes access, manages pricing rules, runs reconciliation, reads the assistant log, publishes guides |
+| **Admin** (the account matching `ADMIN_EMAIL`) | Grants and revokes access, manages pricing rules, runs reconciliation, reads the assistant log, publishes guides. Uses only the admin pages: has its own navbar, and the shop pages send it back to the dashboard (ADR-033) |
 | **Payment providers** | Send webhooks; answer reconciliation queries |
 | **The assistant** | Proposes and completes purchases, but only within the rules the server enforces |
 

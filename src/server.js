@@ -4,7 +4,7 @@ require("dotenv").config();
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const pool = require('./db');
-const { attachUser } = require("./auth");
+const { attachUser, keepAdminInAdminArea } = require("./auth");
 const { createEngine } = require("./domain");
 const { loadProducts } = require("./domain/catalogLoader");
 const { PgLedgerStore } = require('./domain/stores/pgLedgerStore');
@@ -55,6 +55,7 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
   app.use(cookieParser());
   app.use(require('./services/cartSession')); // keeps the applied coupon across page loads
   app.use(attachUser);
+  app.use(keepAdminInAdminArea); // the admin stays in the admin pages (no shopping as the admin)
   // Debug only (LOG_REQUESTS=1): log every POST with its form fields. Passwords, secrets and
   // tokens are never written to the log.
   if (process.env.LOG_REQUESTS === '1') {
